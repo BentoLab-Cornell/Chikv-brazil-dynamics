@@ -1,0 +1,3170 @@
+---
+title: "06 - INLA Space-Time Model (Revised 2016-2025)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+params:
+  run_heavy_models: false
+  results_dir: "results"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 9,
+  fig.height = 5
+)
+
+source("00_setup.R")
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(sf)
+library(spdep)
+library(INLA)
+
+results_dir <- path.expand("~/Downloads/inla_results")
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+
+# This revised file assumes:
+#   Chik_total       -- cleaned SINAN chikungunya notifications
+#   pop_panel_total  -- municipality-year population panel
+#
+# The heavy INLA models are intended to run on Seneca HPC. By default,
+# params$run_heavy_models = FALSE, so knitting this document loads saved
+# model objects instead of refitting them.
+```
+
+# Revision summary
+
+This file is the clean post-revision version of the chikungunya INLA analysis.
+It replaces the earlier exploratory `06_inla_spacetime_model.Rmd` workflow.
+
+The main changes are:
+
+1. **Study period fixed to January 2016 through December 2025** (120 monthly time points).
+2. **All 5,570 Brazilian municipalities are retained in every month.**
+   Municipality-months with no confirmed chikungunya notification are coded as
+   `0 cases`, not `NA`.
+3. **Confirmed chikungunya cases are defined by `CLASSI_FIN %in% c(1, 13)`.**
+4. **Population is modeled as `log(POP)` with an estimated coefficient**, not as
+   a fixed offset.
+5. The primary model remains:
+   **negative binomial + BYM2 space + monthly RW2 time + municipality-month IID
+   Type I space-time interaction**.
+6. Sensitivity analyses are separated from the primary fit:
+   Poisson likelihood; exclusion of 2020-2021; and a Center-West
+   Type I versus Type IV interaction comparison.
+7. Pearson residuals use the **negative-binomial variance**, not the Poisson
+   approximation.
+8. Absolute-incidence checks use the **same confirmed-case definition** as the
+   primary model.
+9. The interpretation of residual or interaction Moran's I is deliberately
+   conservative. Near-zero residual Moran's I is not treated as proof that the
+   spatial model is perfectly specified.
+
+The production primary fit was run on Cornell Seneca HPC using R 4.6.0 and
+INLA 26.8.7. The completed 2016-2025 primary panel contains 668,400
+municipality-month observations (5,570 municipalities x 120 months).
+
+# 1. Municipality shapefile and adjacency graph
+
+For reproducibility, use the same 2020 municipality ordering that was used to
+construct the stored adjacency graph.
+
+```{r shapefile-adjacency}
+if (file.exists("muni_sf_2020.rds")) {
+  muni_sf <- readRDS("muni_sf_2020.rds")
+} else {
+  muni_sf <- read_municipality(year = 2020) %>%
+    st_make_valid()
+}
+
+muni_sf <- muni_sf %>%
+  mutate(
+    code_muni = substr(as.character(code_muni), 1, 6),
+    code_muni = str_pad(code_muni, width = 6, pad = "0")
+  )
+
+space_levels <- muni_sf$code_muni
+
+stopifnot(length(space_levels) == nrow(muni_sf))
+stopifnot(length(space_levels) == 5570L)
+stopifnot(!anyDuplicated(space_levels))
+
+if (file.exists("brazil_muni_2020.adj")) {
+  g <- INLA::inla.read.graph("brazil_muni_2020.adj")
+} else {
+  nb <- poly2nb(muni_sf, queen = TRUE)
+  adj_file <- "brazil_muni_2020.adj"
+  nb2INLA(file = adj_file, nb = nb)
+  g <- INLA::inla.read.graph(adj_file)
+}
+
+nb <- poly2nb(muni_sf, queen = TRUE)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+cat("Municipalities:", length(space_levels), "\n")
+```
+
+# 2. Build the complete 2016-2025 municipality-month panel
+
+The revised panel is constructed **from the complete municipality x month grid
+first**, then confirmed case counts are joined onto it.
+
+This is important. A municipality-month with no confirmed SINAN record is a
+reported count of zero for the count model; it is not a missing observation.
+Building the panel from observed cases first would select municipalities on the
+outcome and would silently remove municipalities with no confirmed cases over a
+period.
+
+```{r panel-function}
+make_panel_muni_month_pop <- function(
+  dat,
+  pop_panel_total,
+  space_levels,
+  start_date = "2016-01-01",
+  end_date   = "2025-12-01"
+) {
+
+  all_months <- seq(
+    as.Date(start_date),
+    as.Date(end_date),
+    by = "month"
+  )
+
+  full_panel <- tidyr::crossing(
+    code_muni = space_levels,
+    ym_date   = all_months
+  ) %>%
+    mutate(
+      ym   = format(ym_date, "%Y-%m"),
+      year = lubridate::year(ym_date)
+    )
+
+  observed_cases <- dat %>%
+    transmute(
+      code_muni = substr(as.character(ID_MUNICIP), 1, 6),
+      code_muni = str_pad(code_muni, width = 6, pad = "0"),
+      ym_date    = floor_date(as.Date(DT_SIN_PRI), unit = "month"),
+      is_conf    = CLASSI_FIN %in% c(1, 13)
+    ) %>%
+    filter(
+      is_conf,
+      !is.na(code_muni),
+      !is.na(ym_date),
+      ym_date >= as.Date(start_date),
+      ym_date <= as.Date(end_date),
+      code_muni %in% space_levels
+    ) %>%
+    count(code_muni, ym_date, name = "cases")
+
+  panel <- full_panel %>%
+    left_join(observed_cases, by = c("code_muni", "ym_date")) %>%
+    mutate(cases = replace_na(cases, 0L)) %>%
+    left_join(pop_panel_total, by = c("code_muni", "year")) %>%
+    rename(POP = total_pop) %>%
+    filter(!is.na(POP), POP > 0) %>%
+    mutate(
+      space = match(code_muni, space_levels),
+      time  = match(ym_date, all_months)
+    )
+
+  n_space <- length(space_levels)
+
+  panel <- panel %>%
+    mutate(
+      st_id = (time - 1L) * n_space + space
+    )
+
+  # Hard checks for the revised analysis.
+  stopifnot(length(all_months) == 120L)
+  stopifnot(n_distinct(panel$code_muni) == 5570L)
+  stopifnot(n_distinct(panel$time) == 120L)
+  stopifnot(nrow(panel) == 5570L * 120L)
+  stopifnot(!anyNA(panel$space))
+  stopifnot(!anyNA(panel$time))
+  stopifnot(!anyNA(panel$POP))
+  stopifnot(!anyNA(panel$cases))
+  stopifnot(min(panel$st_id) == 1L)
+  stopifnot(max(panel$st_id) == 668400L)
+
+  panel
+}
+```
+
+```{r build-panel}
+panel_chik_2016_2025 <- make_panel_muni_month_pop(
+  Chik_total,
+  pop_panel_total,
+  space_levels
+)
+
+cat("Rows:", nrow(panel_chik_2016_2025), "\n")
+cat("Municipalities:", n_distinct(panel_chik_2016_2025$space), "\n")
+cat("Months:", n_distinct(panel_chik_2016_2025$time), "\n")
+cat("Max st_id:", max(panel_chik_2016_2025$st_id), "\n")
+cat("Confirmed cases:", sum(panel_chik_2016_2025$cases), "\n")
+
+if (params$run_heavy_models) {
+  saveRDS(
+    panel_chik_2016_2025,
+    file.path(results_dir, "panel_chik_2016_2025.rds")
+  )
+}
+```
+
+Expected production values are:
+
+- 668,400 rows
+- 5,570 municipalities
+- 120 months
+- maximum `st_id = 668400`
+- 1,215,074 confirmed chikungunya cases
+
+# 3. Primary INLA model
+
+The final primary specification is:
+
+\[
+Y_{it} \sim \mathrm{NegBin}(\mu_{it})
+\]
+
+with
+
+\[
+\log(\mu_{it}) =
+\alpha +
+\beta_{\mathrm{pop}}\log(POP_{it}) +
+u_i +
+v_t +
+\delta_{it}.
+\]
+
+Here:
+
+- `u_i` is the BYM2 spatial main effect;
+- `v_t` is a monthly RW2 temporal main effect;
+- `delta_it` is a municipality-month IID interaction
+  (Knorr-Held Type I);
+- the coefficient of `log(POP)` is **estimated**, not fixed at 1.
+
+```{r primary-formula}
+formula_chik <- cases ~
+  log(POP) +
+  f(
+    space,
+    model = "bym2",
+    graph = g,
+    scale.model = TRUE,
+    hyper = list(
+      prec = list(prior = "pc.prec", param = c(1, 0.01)),
+      phi  = list(prior = "pc",      param = c(0.5, 2/3))
+    )
+  ) +
+  f(
+    time,
+    model = "rw2",
+    constr = TRUE,
+    hyper = list(
+      prec = list(prior = "pc.prec", param = c(1, 0.01))
+    )
+  ) +
+  f(
+    st_id,
+    model = "iid",
+    hyper = list(
+      prec = list(prior = "pc.prec", param = c(2, 0.01))
+    )
+  )
+```
+
+```{r fit-primary}
+# LOCAL SAFETY: heavy fitting disabled; original fitting code retained below as comments.
+# fit_chik_nb_2016_2025 <- inla(
+#   formula_chik,
+#   family = "nbinomial",
+#   data = panel_chik_2016_2025,
+#   control.predictor = list(
+#     compute = TRUE,
+#     link = 1
+#   ),
+#   control.compute = list(
+#     dic = TRUE,
+#     waic = TRUE,
+#     cpo = FALSE,
+#     mlik = FALSE,
+#     return.marginals = FALSE,
+#     openmp.strategy = "huge"
+#   ),
+#   num.threads = "1:1",
+#   verbose = TRUE
+# )
+#
+# saveRDS(
+#   fit_chik_nb_2016_2025,
+#   file.path(results_dir, "fit_chik_nb_2016_2025.rds")
+# )
+```
+
+```{r load-primary}
+# ============================================================
+# LOCAL RECOVERY MODE
+# Heavy INLA fits are intentionally disabled in this file.
+# Existing HPC results are loaded from ~/Downloads/inla_results.
+# ============================================================
+cat("\n=== LOCAL RECOVERY MODE ===\n")
+cat("Results directory:", results_dir, "\n")
+cat("Heavy INLA fitting chunks are commented out.\n\n")
+
+primary_path <- file.path(results_dir, "fit_chik_nb_2016_2025.rds")
+
+if (file.exists(primary_path)) {
+  fit_chik_nb_2016_2025 <- readRDS(primary_path)
+} else if (!exists("fit_chik_nb_2016_2025")) {
+  stop("Primary fit not found. Run the HPC primary model first.")
+}
+
+fit_chik_nb <- fit_chik_nb_2016_2025
+
+# Paths to all saved HPC model fits used by sensitivity sections.
+saved_fit_paths <- list(
+  primary = file.path(results_dir, "fit_chik_nb_2016_2025.rds"),
+  poisson = file.path(results_dir, "fit_chik_poisson_2016_2025.rds"),
+  excl2020_2021 = file.path(results_dir, "fit_chik_nb_excl2020_2021.rds"),
+  cw_type1 = file.path(results_dir, "fit_cw_type1_2016_2025.rds"),
+  cw_type4 = file.path(results_dir, "fit_cw_type4_2016_2025.rds")
+)
+
+missing_saved_fits <- names(saved_fit_paths)[
+  !vapply(saved_fit_paths, file.exists, logical(1))
+]
+
+if (length(missing_saved_fits) > 0) {
+  stop(
+    "Missing saved HPC fit(s): ",
+    paste(missing_saved_fits, collapse = ", "),
+    "\nCheck ~/Downloads/inla_results before continuing."
+  )
+}
+
+cat("PASS: all five saved HPC model fits are available locally.\n")
+
+panel_chik_full <- panel_chik_2016_2025
+```
+
+## 3.1 Primary model summary
+
+```{r primary-summary}
+cat("=== Fixed effects ===\n")
+print(
+  fit_chik_nb$summary.fixed[
+    ,
+    c("mean", "sd", "0.025quant", "0.5quant", "0.975quant")
+  ]
+)
+
+cat("\n=== Hyperparameters ===\n")
+print(
+  fit_chik_nb$summary.hyperpar[
+    ,
+    c("mean", "sd", "0.025quant", "0.5quant", "0.975quant")
+  ]
+)
+
+cat("\nDIC:", fit_chik_nb$dic$dic, "\n")
+cat("WAIC:", fit_chik_nb$waic$waic, "\n")
+```
+
+The completed Seneca production fit gave:
+
+- `log(POP)` = 1.242 (95% CrI 1.198 to 1.287)
+- negative-binomial size = 0.169
+- BYM2 `phi` = 0.788
+- temporal precision = 3.823
+- Type I interaction precision = 0.564
+- DIC = 476,168.7
+- WAIC = 473,989.6
+
+The estimated population coefficient is therefore not treated as an offset.
+The small negative-binomial size parameter indicates substantial
+overdispersion.
+
+# 4. Extract fitted incidence rates
+
+The fitted mean is aligned row-for-row with the data supplied to INLA.
+Incidence rates are therefore obtained from fitted expected cases divided by
+the observed municipality-year population.
+
+```{r extract-lograte-function}
+extract_total_lograte <- function(fit_obj, panel_df, per = 1e5) {
+
+  stopifnot(
+    nrow(panel_df) ==
+      nrow(fit_obj$summary.fitted.values)
+  )
+
+  panel_df %>%
+    mutate(
+      fitted_cases = fit_obj$summary.fitted.values$mean,
+      rate_per_person = fitted_cases / POP,
+      log_rate_per_person = log(rate_per_person),
+      rate_per = rate_per_person * per,
+      log_rate_per = log(rate_per),
+      ym_date = as.Date(ym_date)
+    )
+}
+```
+
+```{r primary-rates}
+st_rate_chik <- extract_total_lograte(
+  fit_chik_nb,
+  panel_chik_full,
+  per = 1e5
+)
+```
+
+# 5. Relative incidence by macro-region
+
+Relative incidence is summarized against the national municipality-median
+fitted incidence in each month.
+
+```{r irr-by-region}
+nat_rate_median <- st_rate_chik %>%
+  group_by(ym_date) %>%
+  summarise(
+    nat_rate = median(rate_per, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+st_rate_chik_region <- st_rate_chik %>%
+  mutate(code_state = substr(code_muni, 1, 2)) %>%
+  left_join(state_region_lookup, by = "code_state") %>%
+  filter(!is.na(region)) %>%
+  left_join(nat_rate_median, by = "ym_date") %>%
+  mutate(
+    IRR = rate_per / nat_rate,
+    log_IRR = log(IRR)
+  )
+
+st_rate_chik_region$region <- factor(
+  st_rate_chik_region$region,
+  levels = c(
+    "North", "Northeast", "Center-West",
+    "Southeast", "South"
+  )
+)
+
+region_time_irr <- st_rate_chik_region %>%
+  group_by(region, ym_date) %>%
+  summarise(
+    median_logIRR = median(log_IRR, na.rm = TRUE),
+    frac_high = mean(IRR > 1, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+region_year_irr <- st_rate_chik_region %>%
+  mutate(year = lubridate::year(ym_date)) %>%
+  group_by(region, year) %>%
+  summarise(
+    median_logIRR = median(log_IRR, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r irr-plots}
+ggplot(region_time_irr, aes(x = ym_date, y = region, fill = median_logIRR)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    midpoint = 0,
+    name = "log(IRR)\nvs national median"
+  ) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Chikungunya Relative Incidence by Macro-region",
+    subtitle = "Monthly, relative to the national municipality median",
+    x = "Year",
+    y = "Region"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggplot(region_time_irr, aes(x = ym_date, y = median_logIRR, color = region)) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Temporal Trends in Relative Incidence by Macro-region",
+    x = "Year",
+    y = "log(IRR)",
+    color = "Region"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+
+## Save post-processed municipality-month IRR objects for Step 07
+
+```{r save-step07-inputs}
+if (exists("st_rate_chik")) {
+  saveRDS(
+    st_rate_chik,
+    file.path(results_dir, "st_rate_chik_2016_2025.rds")
+  )
+}
+
+if (!exists("st_rate_chik_region")) {
+  stop("st_rate_chik_region has not been created; cannot save Step-07 input.")
+}
+
+stopifnot(
+  nrow(st_rate_chik_region) == 668400L,
+  dplyr::n_distinct(st_rate_chik_region$code_muni) == 5570L
+)
+
+saveRDS(
+  st_rate_chik_region,
+  file.path(results_dir, "st_rate_chik_region_2016_2025.rds")
+)
+
+cat("Saved Step-07 input:\n",
+    file.path(results_dir, "st_rate_chik_region_2016_2025.rds"), "\n")
+cat("Rows:", nrow(st_rate_chik_region),
+    "| municipalities:", dplyr::n_distinct(st_rate_chik_region$code_muni), "\n")
+```
+
+# 6. Municipality x time heatmap
+
+```{r muni-time-heatmaps}
+q_rate <- quantile(
+  st_rate_chik$log_rate_per,
+  c(0.01, 0.99),
+  na.rm = TRUE
+)
+
+muni_lat <- muni_sf %>%
+  mutate(
+    pt = st_point_on_surface(geometry),
+    lat = st_coordinates(pt)[, 2]
+  ) %>%
+  st_drop_geometry() %>%
+  select(code_muni, lat)
+
+st_rate_chik_lat <- st_rate_chik %>%
+  left_join(muni_lat, by = "code_muni") %>%
+  filter(!is.na(lat))
+
+muni_order_lat <- st_rate_chik_lat %>%
+  distinct(code_muni, lat) %>%
+  arrange(lat) %>%
+  pull(code_muni)
+
+st_rate_chik_lat <- st_rate_chik_lat %>%
+  mutate(
+    code_muni_lat = factor(
+      code_muni,
+      levels = muni_order_lat
+    )
+  )
+
+ggplot(
+  st_rate_chik_lat,
+  aes(
+    x = ym_date,
+    y = code_muni_lat,
+    fill = log_rate_per
+  )
+) +
+  geom_tile() +
+  scale_fill_gradient2(
+    midpoint = median(
+      st_rate_chik_lat$log_rate_per,
+      na.rm = TRUE
+    ),
+    limits = q_rate,
+    oob = scales::squish,
+    name = "log incidence\nper 100k"
+  ) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Modeled Chikungunya Incidence Across Municipalities",
+    subtitle = "Municipalities ordered south-to-north by latitude",
+    x = "Year",
+    y = "Municipality"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+```
+
+# 7. Spatial, temporal, and Type I interaction effects
+
+For BYM2, retain only the municipality-indexed block of the returned random
+effect when mapping the combined spatial effect.
+
+```{r random-effects}
+n_space <- length(space_levels)
+
+spatial_raw <- fit_chik_nb$summary.random$space
+
+spatial_effect <- spatial_raw %>%
+  filter(ID <= n_space) %>%
+  transmute(
+    space = ID,
+    spatial_mean = mean,
+    code_muni = space_levels[space]
+  )
+
+muni_spatial <- muni_sf %>%
+  left_join(spatial_effect, by = "code_muni")
+
+ggplot(muni_spatial) +
+  geom_sf(aes(fill = spatial_mean), color = NA) +
+  scale_fill_gradient2(
+    midpoint = 0,
+    name = "Spatial effect"
+  ) +
+  labs(
+    title = "BYM2 Spatial Effect",
+    subtitle = "Persistent municipality-level spatial structure"
+  ) +
+  theme_void()
+
+temporal_effect <- fit_chik_nb$summary.random$time %>%
+  transmute(
+    time = ID,
+    temporal_mean = mean
+  )
+
+time_lookup <- panel_chik_full %>%
+  distinct(time, ym_date) %>%
+  arrange(time)
+
+temporal_effect <- temporal_effect %>%
+  left_join(time_lookup, by = "time")
+
+ggplot(temporal_effect, aes(x = ym_date, y = temporal_mean)) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Monthly RW2 Temporal Effect",
+    x = "Year",
+    y = "Temporal random effect"
+  ) +
+  theme_minimal(base_size = 12)
+
+interaction_effect <- fit_chik_nb$summary.random$st_id %>%
+  transmute(
+    st_id = ID,
+    interaction_mean = mean
+  )
+
+st_interaction <- panel_chik_full %>%
+  select(code_muni, ym_date, time, space, st_id) %>%
+  left_join(interaction_effect, by = "st_id") %>%
+  left_join(muni_lat, by = "code_muni") %>%
+  mutate(
+    code_muni_lat = factor(
+      code_muni,
+      levels = muni_order_lat
+    )
+  )
+
+q_int <- quantile(
+  st_interaction$interaction_mean,
+  c(0.01, 0.99),
+  na.rm = TRUE
+)
+
+ggplot(
+  st_interaction,
+  aes(
+    x = ym_date,
+    y = code_muni_lat,
+    fill = interaction_mean
+  )
+) +
+  geom_tile() +
+  scale_fill_gradient2(
+    midpoint = 0,
+    limits = q_int,
+    oob = scales::squish,
+    name = "Type I\ninteraction"
+  ) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    title = "Municipality-Month Type I Interaction",
+    subtitle = "Residual municipality-specific deviations after main space/time effects",
+    x = "Year",
+    y = "Municipality"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+```
+
+# 8. Moran's I of the Type I interaction
+
+A positive Moran's I in an IID interaction should **not** be interpreted as
+evidence that the Type I interaction is correctly specified. It indicates that
+the fitted interaction still contains spatially structured pattern. This is why
+the Center-West Type IV sensitivity analysis is retained below.
+
+```{r morans-i-interaction}
+monthly_moran_interaction <- lapply(
+  sort(unique(st_interaction$time)),
+  function(tt) {
+
+    vals <- st_interaction %>%
+      filter(time == tt) %>%
+      arrange(space) %>%
+      pull(interaction_mean)
+
+    mt <- moran.test(
+      vals,
+      lw,
+      zero.policy = TRUE
+    )
+
+    data.frame(
+      time = tt,
+      ym_date = min(
+        st_interaction$ym_date[
+          st_interaction$time == tt
+        ]
+      ),
+      moran_I = unname(
+        mt$estimate["Moran I statistic"]
+      ),
+      expectation = unname(
+        mt$estimate["Expectation"]
+      ),
+      p_value = mt$p.value
+    )
+  }
+) %>%
+  bind_rows()
+
+ggplot(
+  monthly_moran_interaction,
+  aes(x = ym_date, y = moran_I)
+) +
+  geom_line(linewidth = 1) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Monthly Global Moran's I of the Type I Interaction",
+    x = "Year",
+    y = "Moran's I"
+  ) +
+  theme_minimal(base_size = 12)
+
+summary(monthly_moran_interaction$moran_I)
+```
+
+# 9. Local Moran's I (time-averaged interaction)
+
+```{r lisa}
+muni_avg_interaction <- st_interaction %>%
+  group_by(code_muni, space) %>%
+  summarise(
+    mean_int = mean(interaction_mean, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(space)
+
+lisa_vals <- muni_avg_interaction$mean_int
+
+local_m <- localmoran(
+  lisa_vals,
+  lw,
+  zero.policy = TRUE
+)
+
+muni_lisa <- muni_sf %>%
+  mutate(
+    local_I = local_m[, 1],
+    local_p = local_m[, 5],
+    mean_int = lisa_vals
+  )
+
+mean_val <- mean(lisa_vals)
+lag_val <- lag.listw(
+  lw,
+  lisa_vals,
+  zero.policy = TRUE
+)
+
+muni_lisa <- muni_lisa %>%
+  mutate(
+    quad = case_when(
+      mean_int > mean_val &
+        lag_val > mean_val &
+        local_p < 0.05 ~ "HH",
+      mean_int < mean_val &
+        lag_val < mean_val &
+        local_p < 0.05 ~ "LL",
+      mean_int > mean_val &
+        lag_val < mean_val &
+        local_p < 0.05 ~ "HL",
+      mean_int < mean_val &
+        lag_val > mean_val &
+        local_p < 0.05 ~ "LH",
+      TRUE ~ "Not sig."
+    ),
+    quad = factor(
+      quad,
+      levels = c(
+        "HH", "LL", "HL", "LH", "Not sig."
+      )
+    )
+  )
+
+states_diss <- muni_lisa %>%
+  mutate(
+    code_state = substr(code_muni, 1, 2)
+  ) %>%
+  group_by(code_state) %>%
+  summarise(.groups = "drop")
+
+ggplot(muni_lisa) +
+  geom_sf(aes(fill = quad), color = NA) +
+  geom_sf(
+    data = states_diss,
+    fill = NA,
+    linewidth = 0.3,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "Local Moran's I of Time-Averaged Type I Interaction",
+    subtitle = "HH = high-high; LL = low-low"
+  ) +
+  theme_void()
+```
+
+# 10. Sensitivity analysis 1: Poisson likelihood
+
+This sensitivity changes only the observation likelihood. The spatial,
+temporal, interaction, population, study-period, and prior specifications are
+otherwise unchanged.
+
+```{r fit-poisson}
+# LOCAL SAFETY: heavy fitting disabled; original fitting code retained below as comments.
+# fit_chik_poisson <- inla(
+#   formula_chik,
+#   family = "poisson",
+#   data = panel_chik_2016_2025,
+#   control.predictor = list(
+#     compute = TRUE,
+#     link = 1
+#   ),
+#   control.compute = list(
+#     dic = TRUE,
+#     waic = TRUE,
+#     cpo = FALSE,
+#     mlik = FALSE,
+#     return.marginals = FALSE,
+#     openmp.strategy = "huge"
+#   ),
+#   num.threads = "1:1",
+#   verbose = TRUE
+# )
+#
+# saveRDS(
+#   fit_chik_poisson,
+#   file.path(
+#     results_dir,
+#     "fit_chik_poisson_2016_2025.rds"
+#   )
+# )
+```
+
+```{r poisson-comparison}
+poisson_path <- file.path(
+  results_dir,
+  "fit_chik_poisson_2016_2025.rds"
+)
+
+if (file.exists(poisson_path)) {
+  fit_chik_poisson <- readRDS(poisson_path)
+
+  model_comparison <- data.frame(
+    quantity = c(
+      "log(POP)",
+      "Space precision",
+      "BYM2 phi",
+      "Time precision",
+      "Type I precision",
+      "DIC",
+      "WAIC"
+    ),
+    NB = c(
+      fit_chik_nb$summary.fixed["log(POP)", "mean"],
+      fit_chik_nb$summary.hyperpar["Precision for space", "mean"],
+      fit_chik_nb$summary.hyperpar["Phi for space", "mean"],
+      fit_chik_nb$summary.hyperpar["Precision for time", "mean"],
+      fit_chik_nb$summary.hyperpar["Precision for st_id", "mean"],
+      fit_chik_nb$dic$dic,
+      fit_chik_nb$waic$waic
+    ),
+    Poisson = c(
+      fit_chik_poisson$summary.fixed["log(POP)", "mean"],
+      fit_chik_poisson$summary.hyperpar["Precision for space", "mean"],
+      fit_chik_poisson$summary.hyperpar["Phi for space", "mean"],
+      fit_chik_poisson$summary.hyperpar["Precision for time", "mean"],
+      fit_chik_poisson$summary.hyperpar["Precision for st_id", "mean"],
+      fit_chik_poisson$dic$dic,
+      fit_chik_poisson$waic$waic
+    )
+  )
+
+  print(model_comparison)
+}
+```
+
+The completed Poisson sensitivity gave:
+
+- `log(POP)` = 1.113 (95% CrI 1.070 to 1.156)
+- BYM2 `phi` = 0.793
+- temporal precision = 3.890
+- Type I precision = 0.145
+- DIC = 799,060.7
+- WAIC = 1,864,397
+
+The spatial mixing parameter and temporal precision were very similar to the
+negative-binomial fit. In contrast, the Poisson model required much larger
+municipality-month interaction variance (lower interaction precision), which
+is consistent with the IID interaction absorbing extra-Poisson variability.
+Information criteria were also substantially poorer under Poisson.
+
+Because the model contains a municipality-month latent interaction, WAIC is
+interpreted cautiously and is not used as the sole basis for likelihood choice.
+The strong overdispersion estimate in the negative-binomial model and the
+increase in interaction variance under Poisson are considered jointly.
+
+# 11. Sensitivity analysis 2: excluding 2020-2021
+
+The pandemic sensitivity removes observations from 2020-2021 while retaining
+the original monthly RW2 index. The temporal process therefore preserves the
+actual calendar gap.
+
+The IID interaction has no temporal adjacency, so its index is compacted over
+the retained municipality-month observations only.
+
+```{r fit-exclude-pandemic}
+# LOCAL SAFETY: heavy fitting disabled; original fitting code retained below as comments.
+# panel_excl2021 <- panel_chik_2016_2025 %>%
+#   filter(!year %in% c(2020L, 2021L)) %>%
+#   arrange(time, space)
+#
+# included_times <- sort(unique(panel_excl2021$time))
+# time_compact <- match(
+#   panel_excl2021$time,
+#   included_times
+# )
+#
+# panel_excl2021 <- panel_excl2021 %>%
+#   mutate(
+#     st_id_excl =
+#       (time_compact - 1L) *
+#       length(space_levels) +
+#       space
+#   )
+#
+# formula_excl <- cases ~
+#   log(POP) +
+#   f(
+#     space,
+#     model = "bym2",
+#     graph = g,
+#     scale.model = TRUE,
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(1, 0.01)
+#       ),
+#       phi = list(
+#         prior = "pc",
+#         param = c(0.5, 2/3)
+#       )
+#     )
+#   ) +
+#   f(
+#     time,
+#     model = "rw2",
+#     constr = TRUE,
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(1, 0.01)
+#       )
+#     )
+#   ) +
+#   f(
+#     st_id_excl,
+#     model = "iid",
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(2, 0.01)
+#       )
+#     )
+#   )
+#
+# fit_chik_nb_excl2021 <- inla(
+#   formula_excl,
+#   family = "nbinomial",
+#   data = panel_excl2021,
+#   control.predictor = list(
+#     compute = TRUE,
+#     link = 1
+#   ),
+#   control.compute = list(
+#     dic = TRUE,
+#     waic = TRUE,
+#     cpo = FALSE,
+#     mlik = FALSE,
+#     return.marginals = FALSE,
+#     openmp.strategy = "huge"
+#   ),
+#   num.threads = "1:1",
+#   verbose = TRUE
+# )
+#
+# saveRDS(
+#   fit_chik_nb_excl2021,
+#   file.path(
+#     results_dir,
+#     "fit_chik_nb_excl2020_2021.rds"
+#   )
+# )
+```
+
+```{r compare-exclude-pandemic}
+excl_path <- file.path(
+  results_dir,
+  "fit_chik_nb_excl2020_2021.rds"
+)
+
+if (file.exists(excl_path)) {
+  fit_chik_nb_excl2021 <- readRDS(excl_path)
+
+  cat(
+    "Full-data phi:",
+    fit_chik_nb$summary.hyperpar[
+      "Phi for space", "mean"
+    ],
+    "\n"
+  )
+
+  cat(
+    "Excluding 2020-2021 phi:",
+    fit_chik_nb_excl2021$summary.hyperpar[
+      "Phi for space", "mean"
+    ],
+    "\n"
+  )
+
+  spatial_excl <- fit_chik_nb_excl2021$summary.random$space %>%
+    filter(ID <= length(space_levels)) %>%
+    transmute(
+      space = ID,
+      spatial_mean_excl = mean,
+      code_muni = space_levels[space]
+    )
+
+  spatial_compare <- spatial_effect %>%
+    select(code_muni, spatial_mean) %>%
+    inner_join(
+      spatial_excl %>%
+        select(
+          code_muni,
+          spatial_mean_excl
+        ),
+      by = "code_muni"
+    )
+
+  cat(
+    "Spatial-effect correlation:",
+    cor(
+      spatial_compare$spatial_mean,
+      spatial_compare$spatial_mean_excl,
+      use = "complete.obs"
+    ),
+    "\n"
+  )
+}
+```
+
+# 12. Sensitivity analysis 3: Center-West Type I versus Type IV
+
+The comparison is restricted to Center-West to keep the structured
+space-time sensitivity computationally tractable.
+
+Both models must contain the **same spatial and temporal main effects**.
+The only intended difference is the interaction structure:
+
+- Type I: unstructured municipality-month IID interaction;
+- Type IV: structured space x structured time interaction.
+
+The old grouped-BYM2 implementation is not used here because it does not give
+a clean comparison in which only the interaction structure changes.
+
+```{r centerwest-subgraph}
+cw_states <- c("50", "51", "52", "53")
+
+muni_sf_cw <- muni_sf %>%
+  filter(
+    substr(code_muni, 1, 2) %in% cw_states
+  )
+
+space_levels_cw <- muni_sf_cw$code_muni
+n_space_cw <- length(space_levels_cw)
+
+nb_cw <- poly2nb(
+  muni_sf_cw,
+  queen = TRUE
+)
+
+adj_file_cw <- tempfile(fileext = ".adj")
+nb2INLA(
+  file = adj_file_cw,
+  nb = nb_cw
+)
+
+g_cw <- INLA::inla.read.graph(adj_file_cw)
+
+panel_chik_cw <- panel_chik_2016_2025 %>%
+  filter(
+    code_muni %in% space_levels_cw
+  ) %>%
+  mutate(
+    space_cw = match(
+      code_muni,
+      space_levels_cw
+    ),
+    time_cw = time,
+    st_id_cw =
+      (time_cw - 1L) *
+      n_space_cw +
+      space_cw
+  ) %>%
+  arrange(time_cw, space_cw)
+
+stopifnot(
+  n_distinct(panel_chik_cw$time_cw) == 120L
+)
+```
+
+```{r fit-centerwest-type1}
+# LOCAL SAFETY: heavy fitting disabled; original fitting code retained below as comments.
+# formula_type1_cw <- cases ~
+#   log(POP) +
+#   f(
+#     space_cw,
+#     model = "bym2",
+#     graph = g_cw,
+#     scale.model = TRUE,
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(1, 0.01)
+#       ),
+#       phi = list(
+#         prior = "pc",
+#         param = c(0.5, 2/3)
+#       )
+#     )
+#   ) +
+#   f(
+#     time_cw,
+#     model = "rw2",
+#     constr = TRUE,
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(1, 0.01)
+#       )
+#     )
+#   ) +
+#   f(
+#     st_id_cw,
+#     model = "iid",
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(2, 0.01)
+#       )
+#     )
+#   )
+#
+# fit_cw_type1 <- inla(
+#   formula_type1_cw,
+#   family = "nbinomial",
+#   data = panel_chik_cw,
+#   control.predictor = list(
+#     compute = TRUE,
+#     link = 1
+#   ),
+#   control.compute = list(
+#     dic = TRUE,
+#     waic = TRUE,
+#     cpo = FALSE,
+#     mlik = FALSE,
+#     return.marginals = FALSE
+#   ),
+#   num.threads = "1:1",
+#   verbose = TRUE
+# )
+#
+# saveRDS(
+#   fit_cw_type1,
+#   file.path(
+#     results_dir,
+#     "fit_cw_type1_2016_2025.rds"
+#   )
+# )
+```
+
+```{r fit-centerwest-type4}
+# LOCAL SAFETY: heavy fitting disabled; original fitting code retained below as comments.
+# formula_main_cw <- cases ~
+#   log(POP) +
+#   f(
+#     space_cw,
+#     model = "bym2",
+#     graph = g_cw,
+#     scale.model = TRUE,
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(1, 0.01)
+#       ),
+#       phi = list(
+#         prior = "pc",
+#         param = c(0.5, 2/3)
+#       )
+#     )
+#   ) +
+#   f(
+#     time_cw,
+#     model = "rw2",
+#     constr = TRUE,
+#     hyper = list(
+#       prec = list(
+#         prior = "pc.prec",
+#         param = c(1, 0.01)
+#       )
+#     )
+#   )
+#
+# fit_cw_type4 <- INLA::inla.knmodels(
+#   formula_main_cw,
+#   data = panel_chik_cw,
+#   family = "nbinomial",
+#   control.st = list(
+#     time = panel_chik_cw$time_cw,
+#     space = panel_chik_cw$space_cw,
+#     spacetime = panel_chik_cw$st_id_cw,
+#     graph = g_cw,
+#     type = 4
+#   ),
+#   control.predictor = list(
+#     compute = TRUE,
+#     link = 1
+#   ),
+#   control.compute = list(
+#     dic = TRUE,
+#     waic = TRUE,
+#     cpo = FALSE,
+#     mlik = FALSE,
+#     return.marginals = FALSE
+#   ),
+#   num.threads = "1:1",
+#   verbose = TRUE
+# )
+#
+# saveRDS(
+#   fit_cw_type4,
+#   file.path(
+#     results_dir,
+#     "fit_cw_type4_2016_2025.rds"
+#   )
+# )
+```
+
+```{r compare-centerwest-type1-type4}
+cw_type1_path <- file.path(
+  results_dir,
+  "fit_cw_type1_2016_2025.rds"
+)
+
+cw_type4_path <- file.path(
+  results_dir,
+  "fit_cw_type4_2016_2025.rds"
+)
+
+if (
+  file.exists(cw_type1_path) &&
+  file.exists(cw_type4_path)
+) {
+  fit_cw_type1 <- readRDS(cw_type1_path)
+  fit_cw_type4 <- readRDS(cw_type4_path)
+
+  data.frame(
+    model = c(
+      "Center-West Type I",
+      "Center-West Type IV"
+    ),
+    DIC = c(
+      fit_cw_type1$dic$dic,
+      fit_cw_type4$dic$dic
+    ),
+    WAIC = c(
+      fit_cw_type1$waic$waic,
+      fit_cw_type4$waic$waic
+    )
+  )
+}
+```
+
+# 13. Primary model diagnostics
+
+## 13.1 Negative-binomial Pearson residuals
+
+For the fitted negative-binomial parameterization:
+
+\[
+\mathrm{Var}(Y) =
+\mu + \frac{\mu^2}{k},
+\]
+
+where `k` is the reported negative-binomial size parameter.
+
+```{r diagnostics-residuals}
+size_row <- grep(
+  "^size for the nbinomial observations",
+  rownames(fit_chik_nb$summary.hyperpar),
+  value = TRUE
+)
+
+stopifnot(length(size_row) == 1L)
+
+nb_size <- fit_chik_nb$summary.hyperpar[
+  size_row,
+  "mean"
+]
+
+panel_with_resid <- panel_chik_full %>%
+  mutate(
+    fitted =
+      fit_chik_nb$summary.fitted.values$mean,
+    resid_raw =
+      cases - fitted,
+    resid_pearson =
+      resid_raw /
+      sqrt(
+        fitted +
+        fitted^2 / nb_size
+      )
+  )
+
+resid_by_muni <- panel_with_resid %>%
+  group_by(space, code_muni) %>%
+  summarise(
+    mean_resid =
+      mean(
+        resid_pearson,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  ) %>%
+  arrange(space)
+
+moran_resid <- moran.test(
+  resid_by_muni$mean_resid,
+  lw,
+  zero.policy = TRUE
+)
+
+print(moran_resid)
+```
+
+Interpretation should remain conservative. Because the model contains one IID
+interaction term for every municipality-month, near-zero residual spatial
+autocorrelation is descriptive evidence only; it is **not** proof that the
+spatial model captured every relevant spatial process.
+
+```{r residual-map}
+resid_map_data <- muni_sf %>%
+  left_join(
+    resid_by_muni %>%
+      select(code_muni, mean_resid),
+    by = "code_muni"
+  )
+
+ggplot(resid_map_data) +
+  geom_sf(
+    aes(fill = mean_resid),
+    color = NA
+  ) +
+  scale_fill_gradient2(
+    midpoint = 0,
+    name = "Mean Pearson\nresidual"
+  ) +
+  labs(
+    title =
+      "Time-Averaged Negative-Binomial Pearson Residuals"
+  ) +
+  theme_void()
+```
+
+## 13.2 Posterior parameter table
+
+```{r diagnostics-parameter-table}
+cat("=== Fixed effects ===\n")
+print(
+  fit_chik_nb$summary.fixed[
+    ,
+    c(
+      "mean", "sd",
+      "0.025quant",
+      "0.5quant",
+      "0.975quant"
+    )
+  ]
+)
+
+cat("\n=== Hyperparameters ===\n")
+print(
+  fit_chik_nb$summary.hyperpar[
+    ,
+    c(
+      "mean", "sd",
+      "0.025quant",
+      "0.5quant",
+      "0.975quant"
+    )
+  ]
+)
+```
+
+## 13.3 CPO/PIT
+
+CPO/PIT are **not part of the production primary fit** in this revision.
+The main fit uses `cpo = FALSE`.
+
+If CPO/PIT are needed for the final revision, they should be run as a separate
+HPC job rather than making the primary fit dependent on successful CPO result
+collection. Previous attempts at this scale showed that model estimation could
+finish while CPO result collection itself failed. This is reported as a
+computational limitation rather than being treated as evidence for or against
+the model specification.
+
+```{r diagnostics-cpo, eval=FALSE}
+# LOCAL SAFETY: disabled additional INLA refit (e.g., CPO/PIT attempt).
+# fit_chik_nb_cpo <- inla(
+#   formula_chik,
+#   family = "nbinomial",
+#   data = panel_chik_2016_2025,
+#   control.predictor = list(
+#     compute = TRUE,
+#     link = 1
+#   ),
+#   control.compute = list(
+#     dic = TRUE,
+#     waic = TRUE,
+#     cpo = TRUE,
+#     mlik = FALSE,
+#     return.marginals = FALSE,
+#     openmp.strategy = "huge"
+#   ),
+#   num.threads = "1:1",
+#   verbose = TRUE
+# )
+```
+
+# 14. Absolute-incidence sanity checks
+
+These checks use the **same confirmed-case definition** as the model:
+`CLASSI_FIN %in% c(1, 13)`.
+
+The revised analysis period begins in 2016, so the Northeast check is shown for
+2016-2017 rather than 2015-2017.
+
+```{r absolute-incidence-checks}
+northeast_states <- c(
+  "21", "22", "23", "24", "25",
+  "26", "27", "28", "29"
+)
+
+ne_pop_by_year <- pop_panel_total %>%
+  filter(
+    substr(code_muni, 1, 2) %in%
+      northeast_states
+  ) %>%
+  group_by(year) %>%
+  summarise(
+    ne_pop =
+      sum(total_pop, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ne_cases_by_year <- Chik_total %>%
+  transmute(
+    year =
+      lubridate::year(
+        as.Date(DT_SIN_PRI)
+      ),
+    code_state =
+      substr(
+        as.character(ID_MUNICIP),
+        1, 2
+      ),
+    is_conf =
+      CLASSI_FIN %in% c(1, 13)
+  ) %>%
+  filter(
+    is_conf,
+    code_state %in% northeast_states,
+    year %in% 2016:2017
+  ) %>%
+  count(year) %>%
+  left_join(
+    ne_pop_by_year,
+    by = "year"
+  ) %>%
+  mutate(
+    incidence_per_100k =
+      n / ne_pop * 1e5
+  )
+
+print(ne_cases_by_year)
+
+cw_states <- c("50", "51", "52", "53")
+
+cw_pop_by_year <- pop_panel_total %>%
+  filter(
+    substr(code_muni, 1, 2) %in%
+      cw_states
+  ) %>%
+  group_by(year) %>%
+  summarise(
+    cw_pop =
+      sum(total_pop, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cw_cases_by_year <- Chik_total %>%
+  transmute(
+    year =
+      lubridate::year(
+        as.Date(DT_SIN_PRI)
+      ),
+    code_state =
+      substr(
+        as.character(ID_MUNICIP),
+        1, 2
+      ),
+    is_conf =
+      CLASSI_FIN %in% c(1, 13)
+  ) %>%
+  filter(
+    is_conf,
+    code_state %in% cw_states,
+    year %in% 2024:2025
+  ) %>%
+  count(year) %>%
+  left_join(
+    cw_pop_by_year,
+    by = "year"
+  ) %>%
+  mutate(
+    incidence_per_100k =
+      n / cw_pop * 1e5
+  )
+
+print(cw_cases_by_year)
+```
+
+# 15. Computational provenance and development record
+
+This section documents the major decisions made while revising the analysis.
+It is intended for reproducibility and internal revision tracking, not
+necessarily for inclusion in the manuscript.
+
+## 15.1 Full 2015-2025 model troubleshooting
+
+The original full analysis window contained 132 months:
+
+- 5,570 municipalities
+- 132 months
+- 735,240 municipality-month observations
+- 735,240 Type I interaction levels
+
+The full 2015-2025 model repeatedly failed in the INLA backend despite multiple
+diagnostic changes.
+
+The following checks were performed during troubleshooting:
+
+- shorter windows such as 2015 only, 2015-2017, and 2015-2022;
+- 2015-2024;
+- 2016-2025;
+- a lean fit with DIC/WAIC and additional outputs disabled;
+- a newer INLA installation under R 4.6.0;
+- warm-starting from the successful 2016-2025 mode;
+- fixing the hyperparameters at the 2016-2025 estimates;
+- a full Poisson model with the same Type I interaction;
+- threshold-size experiments between 120 and 132 months.
+
+The important conclusion from those checks was that the failure could not be
+explained simply by RAM, the negative-binomial likelihood, DIC/WAIC output, or
+poor hyperparameter initialization. The full 132-month latent interaction was
+the persistent computational difficulty.
+
+The revised analysis therefore uses the fixed 2016-2025 period, which preserves
+10 complete calendar years and the original monthly Type I interaction
+structure.
+
+## 15.2 Successful production run
+
+The revised primary model was successfully completed on Seneca:
+
+- 668,400 municipality-month observations
+- elapsed time approximately 2 h 46 min
+- peak memory approximately 15.8 GB
+- exit code 0
+- R 4.6.0
+- INLA 26.8.7
+
+The earlier diagnostic 2016-2025 fit and the clean revised production fit both
+completed at essentially the same scale and runtime, supporting the stability
+of the 120-month analysis.
+
+## 15.3 Model interpretation decisions
+
+The following interpretation rules are retained throughout the revision:
+
+- zero confirmed-case municipality-months are modeled as `0`, not `NA`;
+- population is not treated as an offset;
+- the Type I interaction is not removed merely to reduce computational cost;
+- persistent spatial autocorrelation in an IID interaction is treated as a
+  reason for a structured-interaction sensitivity analysis, not as validation
+  of the IID interaction;
+- residual Moran's I is interpreted cautiously because the model contains a
+  municipality-month latent effect;
+- DIC/WAIC are compared across sensitivity models but are not interpreted in
+  isolation, particularly when an observation-level latent interaction is
+  present.
+
+
+# 16. Reviewer-facing Bayesian validation package
+
+This section consolidates the Bayesian-model validation work added during the
+revision. It is intentionally kept in the INLA file because all of these checks
+depend directly on the primary INLA fit.
+
+The package includes:
+
+- a complete posterior parameter table;
+- prior-versus-posterior plots for the random-effect standard deviations;
+- area-averaged negative-binomial Pearson residuals;
+- a formal residual Moran's I test;
+- monthly Moran's I for the Type I interaction;
+- observed-versus-fitted sanity checks;
+- Poisson likelihood sensitivity;
+- exclusion of 2020-2021;
+- the structured-interaction sensitivity workflow;
+- documentation of the CPO/PIT attempts and their computational limitation;
+- computation time and software environment.
+
+## 16.1 Complete posterior parameter table
+
+```{r reviewer-parameter-table}
+fixed_tab <- fit_chik_nb$summary.fixed %>%
+  tibble::rownames_to_column("parameter") %>%
+  select(
+    parameter,
+    mean,
+    sd,
+    `0.025quant`,
+    `0.5quant`,
+    `0.975quant`
+  )
+
+hyper_tab <- fit_chik_nb$summary.hyperpar %>%
+  tibble::rownames_to_column("parameter") %>%
+  select(
+    parameter,
+    mean,
+    sd,
+    `0.025quant`,
+    `0.5quant`,
+    `0.975quant`
+  )
+
+cat("=== FIXED EFFECTS ===\n")
+print(fixed_tab)
+
+cat("\n=== HYPERPARAMETERS ===\n")
+print(hyper_tab)
+```
+
+For the revised 2016-2025 primary fit, the principal estimates are:
+
+- intercept: -16.030 (95% CrI -16.465 to -15.596);
+- `log(POP)`: 1.242 (95% CrI 1.198 to 1.287);
+- negative-binomial size: 0.169;
+- spatial precision: 0.235;
+- BYM2 mixing parameter `phi`: 0.788;
+- temporal precision: 3.823;
+- Type I interaction precision: 0.564.
+
+## 16.2 Prior versus posterior: random-effect standard deviations
+
+The final reviewer-facing figure is shown on the **standard-deviation scale**
+rather than the precision scale because standard deviations are more directly
+interpretable.
+
+For a PC precision prior specified as `pc.prec(u, alpha)`, the implied standard
+deviation prior satisfies
+
+\[
+P(\sigma > u) = \alpha
+\]
+
+and therefore has an exponential density with rate
+`-log(alpha) / u`.
+
+The three panels correspond to the spatial heterogeneity scale, temporal RW2
+scale, and municipality-month Type I interaction scale.
+
+```{r prior-posterior-sd}
+# ------------------------------------------------------------
+# Posterior precision -> posterior standard deviation
+# ------------------------------------------------------------
+
+post_space_prec <- fit_chik_nb$marginals.hyperpar[["Precision for space"]]
+post_time_prec  <- fit_chik_nb$marginals.hyperpar[["Precision for time"]]
+post_st_prec    <- fit_chik_nb$marginals.hyperpar[["Precision for st_id"]]
+
+stopifnot(
+  !is.null(post_space_prec),
+  !is.null(post_time_prec),
+  !is.null(post_st_prec)
+)
+
+post_space_sd <- INLA::inla.tmarginal(
+  function(tau) 1 / sqrt(tau),
+  post_space_prec
+)
+
+post_time_sd <- INLA::inla.tmarginal(
+  function(tau) 1 / sqrt(tau),
+  post_time_prec
+)
+
+post_st_sd <- INLA::inla.tmarginal(
+  function(tau) 1 / sqrt(tau),
+  post_st_prec
+)
+
+# PC prior density on the SD scale:
+# P(sigma > u) = alpha  -> sigma ~ Exponential(lambda)
+pc_sd_density <- function(x, u, alpha) {
+  lambda <- -log(alpha) / u
+  ifelse(x >= 0, lambda * exp(-lambda * x), 0)
+}
+
+make_prior_post_panel <- function(
+  posterior_marginal,
+  u,
+  alpha,
+  title,
+  x_lab
+) {
+  post <- as.data.frame(posterior_marginal)
+  names(post) <- c("x", "density")
+
+  # Plot over the range supported by the posterior, with modest extension
+  # so the PC prior remains visible without allowing its long tail to flatten
+  # the posterior display.
+  xmax <- max(post$x, na.rm = TRUE) * 1.15
+  prior <- data.frame(
+    x = seq(0, xmax, length.out = 500)
+  ) %>%
+    mutate(
+      density = pc_sd_density(x, u = u, alpha = alpha)
+    )
+
+  ggplot() +
+    geom_area(
+      data = post,
+      aes(x = x, y = density),
+      alpha = 0.20
+    ) +
+    geom_line(
+      data = post,
+      aes(x = x, y = density, linetype = "Posterior"),
+      linewidth = 0.9
+    ) +
+    geom_line(
+      data = prior,
+      aes(x = x, y = density, linetype = "Prior"),
+      linewidth = 0.8
+    ) +
+    scale_linetype_manual(
+      values = c(
+        "Posterior" = "solid",
+        "Prior" = "dashed"
+      ),
+      name = NULL
+    ) +
+    labs(
+      title = title,
+      x = x_lab,
+      y = "Density"
+    ) +
+    theme_classic(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold")
+    )
+}
+
+p1 <- make_prior_post_panel(
+  posterior_marginal = post_space_sd,
+  u = 1,
+  alpha = 0.01,
+  title = "Spatial heterogeneity",
+  x_lab = expression(sigma[spatial])
+)
+
+p2 <- make_prior_post_panel(
+  posterior_marginal = post_time_sd,
+  u = 1,
+  alpha = 0.01,
+  title = "Temporal effect",
+  x_lab = expression(sigma[time])
+)
+
+p3 <- make_prior_post_panel(
+  posterior_marginal = post_st_sd,
+  u = 2,
+  alpha = 0.01,
+  title = "Space-time interaction",
+  x_lab = expression(sigma[interaction])
+)
+
+fig_prior_post <- p1 + p2 + p3 +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = "a") &
+  theme(
+    legend.position = "bottom",
+    plot.tag = element_text(
+      face = "bold",
+      size = 12
+    )
+  )
+
+fig_prior_post
+```
+
+The posterior mean SDs are approximately:
+
+- spatial heterogeneity: 2.07;
+- temporal RW2 effect: 0.52;
+- Type I space-time interaction: 1.33.
+
+The BYM2 `phi` posterior is reported in the parameter table rather than in this
+three-panel SD figure because `phi` is a mixing parameter, not a standard
+deviation.
+
+## 16.3 Negative-binomial Pearson residuals
+
+The revised residual definition uses the negative-binomial variance
+
+\[
+Var(Y_{it}) = \mu_{it} + \mu_{it}^2/k
+\]
+
+rather than the Poisson approximation `sqrt(mu)` used in an earlier exploratory
+version.
+
+```{r reviewer-nb-residuals}
+size_name <- grep(
+  "^size for the nbinomial observations",
+  rownames(fit_chik_nb$summary.hyperpar),
+  value = TRUE
+)
+
+stopifnot(length(size_name) == 1L)
+
+nb_size <- fit_chik_nb$summary.hyperpar[
+  size_name,
+  "mean"
+]
+
+fitted_mean <- fit_chik_nb$summary.fitted.values$mean
+
+stopifnot(
+  length(fitted_mean) == nrow(panel_chik_full)
+)
+
+panel_with_resid <- panel_chik_full %>%
+  mutate(
+    fitted = fitted_mean,
+    resid_raw = cases - fitted,
+    resid_pearson =
+      resid_raw /
+      sqrt(
+        fitted +
+        fitted^2 / nb_size
+      )
+  )
+```
+
+## 16.4 Observed-versus-fitted sanity checks
+
+```{r reviewer-observed-fitted-checks}
+obs_total <- sum(
+  panel_with_resid$cases,
+  na.rm = TRUE
+)
+
+fit_total <- sum(
+  panel_with_resid$fitted,
+  na.rm = TRUE
+)
+
+cat("Observed total cases:", obs_total, "\n")
+cat("Fitted total cases:", fit_total, "\n")
+cat("Observed / fitted ratio:", obs_total / fit_total, "\n")
+
+cat(
+  "Positive Pearson residual municipality-months:",
+  sum(
+    panel_with_resid$resid_pearson > 0,
+    na.rm = TRUE
+  ),
+  "\n"
+)
+
+cat(
+  "Negative Pearson residual municipality-months:",
+  sum(
+    panel_with_resid$resid_pearson < 0,
+    na.rm = TRUE
+  ),
+  "\n"
+)
+```
+
+In the revised production model the observed total was 1,215,074 cases and the
+sum of fitted posterior means was approximately 1.08 million. This diagnostic
+is retained explicitly because the municipality-month interaction can produce
+good local fit while aggregate calibration still deserves inspection.
+
+## 16.5 Area-averaged residual map
+
+Residuals are averaged over the 120 months within each municipality before
+mapping.
+
+```{r reviewer-residual-map}
+resid_by_muni <- panel_with_resid %>%
+  group_by(
+    space,
+    code_muni
+  ) %>%
+  summarise(
+    mean_pearson =
+      mean(
+        resid_pearson,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  ) %>%
+  arrange(space)
+
+stopifnot(
+  nrow(resid_by_muni) == 5570L
+)
+
+resid_map_data <- muni_sf %>%
+  left_join(
+    resid_by_muni %>%
+      select(
+        code_muni,
+        mean_pearson
+      ),
+    by = "code_muni"
+  )
+
+stopifnot(
+  sum(is.na(resid_map_data$mean_pearson)) == 0L
+)
+
+ggplot(resid_map_data) +
+  geom_sf(
+    aes(fill = mean_pearson),
+    color = NA
+  ) +
+  scale_fill_gradient2(
+    midpoint = 0,
+    name = "Mean Pearson\nresidual"
+  ) +
+  labs(
+    title =
+      "Area-averaged Pearson residuals",
+    subtitle =
+      "Negative-binomial Pearson residuals, averaged across 2016-2025"
+  ) +
+  theme_void()
+```
+
+## 16.6 Formal test of residual spatial autocorrelation
+
+The municipality order used for residual testing must match the spatial graph
+order exactly.
+
+```{r reviewer-residual-moran}
+resid_vals <- resid_by_muni %>%
+  arrange(space) %>%
+  pull(mean_pearson)
+
+stopifnot(
+  length(resid_vals) ==
+    length(space_levels)
+)
+
+moran_resid <- spdep::moran.test(
+  resid_vals,
+  lw,
+  zero.policy = TRUE
+)
+
+print(moran_resid)
+```
+
+A significant residual Moran's I indicates remaining spatial autocorrelation
+after the fitted fixed and random effects. Conversely, a small or non-significant
+residual Moran's I should be described only as a diagnostic result; it is not
+proof that the spatial specification is uniquely correct.
+
+## 16.7 Monthly Moran's I of the Type I interaction
+
+The Type I interaction is IID by construction. Therefore persistent positive
+Moran's I in the posterior interaction field is evidence that the interaction
+contains spatially structured pattern, not evidence that the IID assumption is
+validated.
+
+```{r reviewer-monthly-interaction-moran}
+interaction_effect <- fit_chik_nb$summary.random$st_id %>%
+  transmute(
+    st_id = ID,
+    interaction_mean = mean
+  )
+
+interaction_panel <- panel_chik_full %>%
+  select(
+    st_id,
+    time,
+    ym_date,
+    space
+  ) %>%
+  left_join(
+    interaction_effect,
+    by = "st_id"
+  ) %>%
+  arrange(
+    time,
+    space
+  )
+
+monthly_moran <- lapply(
+  sort(unique(interaction_panel$time)),
+  function(tt) {
+
+    z <- interaction_panel$interaction_mean[
+      interaction_panel$time == tt
+    ]
+
+    mt <- spdep::moran.test(
+      z,
+      lw,
+      zero.policy = TRUE
+    )
+
+    data.frame(
+      time = tt,
+      ym_date = min(
+        interaction_panel$ym_date[
+          interaction_panel$time == tt
+        ]
+      ),
+      moran_I = unname(
+        mt$estimate[
+          "Moran I statistic"
+        ]
+      ),
+      expectation = unname(
+        mt$estimate[
+          "Expectation"
+        ]
+      ),
+      p_value = mt$p.value
+    )
+  }
+) %>%
+  bind_rows()
+
+ggplot(
+  monthly_moran,
+  aes(
+    x = ym_date,
+    y = moran_I
+  )
+) +
+  geom_line(linewidth = 0.9) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    title =
+      "Monthly Moran's I of the Type I interaction",
+    x = "Month",
+    y = "Moran's I"
+  ) +
+  theme_minimal(base_size = 12)
+
+summary(
+  monthly_moran$moran_I
+)
+```
+
+This diagnostic motivates the structured-interaction sensitivity analysis. It
+does not by itself determine which interaction structure should be retained.
+
+## 16.8 NB versus Poisson posterior comparison
+
+```{r reviewer-nb-poisson-table}
+poisson_path <- file.path(
+  results_dir,
+  "fit_chik_poisson_2016_2025.rds"
+)
+
+if (file.exists(poisson_path)) {
+
+  fit_chik_poisson <- readRDS(
+    poisson_path
+  )
+
+  nb_pois_compare <- tibble::tibble(
+    quantity = c(
+      "log(POP)",
+      "Spatial precision",
+      "BYM2 phi",
+      "Temporal precision",
+      "Type I precision",
+      "DIC",
+      "WAIC"
+    ),
+    Negative_binomial = c(
+      fit_chik_nb$summary.fixed[
+        "log(POP)", "mean"
+      ],
+      fit_chik_nb$summary.hyperpar[
+        "Precision for space", "mean"
+      ],
+      fit_chik_nb$summary.hyperpar[
+        "Phi for space", "mean"
+      ],
+      fit_chik_nb$summary.hyperpar[
+        "Precision for time", "mean"
+      ],
+      fit_chik_nb$summary.hyperpar[
+        "Precision for st_id", "mean"
+      ],
+      fit_chik_nb$dic$dic,
+      fit_chik_nb$waic$waic
+    ),
+    Poisson = c(
+      fit_chik_poisson$summary.fixed[
+        "log(POP)", "mean"
+      ],
+      fit_chik_poisson$summary.hyperpar[
+        "Precision for space", "mean"
+      ],
+      fit_chik_poisson$summary.hyperpar[
+        "Phi for space", "mean"
+      ],
+      fit_chik_poisson$summary.hyperpar[
+        "Precision for time", "mean"
+      ],
+      fit_chik_poisson$summary.hyperpar[
+        "Precision for st_id", "mean"
+      ],
+      fit_chik_poisson$dic$dic,
+      fit_chik_poisson$waic$waic
+    )
+  )
+
+  print(nb_pois_compare)
+}
+```
+
+Completed Poisson sensitivity values:
+
+- `log(POP)` = 1.113 (95% CrI 1.070 to 1.156);
+- spatial precision = 0.255;
+- BYM2 `phi` = 0.793;
+- temporal precision = 3.890;
+- Type I interaction precision = 0.145;
+- DIC = 799,060.7;
+- WAIC = 1,864,397.
+
+The spatial mixing parameter and temporal precision were highly stable. The
+Poisson model required much larger Type I interaction variance, consistent with
+that latent term absorbing substantial extra-Poisson variation. The
+population-scaling coefficient was directionally consistent but smaller under
+Poisson, so its magnitude should not be described as likelihood-insensitive.
+
+## 16.9 Prior and posterior interpretation
+
+The prior-posterior figure is intended as a diagnostic of how strongly the data
+update the stated PC priors. It should not be interpreted only by visual overlap:
+posterior concentration, location, and the transformed SD scale are considered
+together.
+
+The BYM2 `phi` parameter is reported separately because it controls the share
+of spatial variance attributed to the structured component. In the primary fit
+the posterior mean `phi` is approximately 0.79.
+
+## 16.10 CPO/PIT attempt and limitation
+
+CPO and PIT were requested as cross-validatory diagnostics. During development,
+large-model CPO collection was attempted separately from the primary production
+fit. The INLA backend was able to estimate the model but failed during result
+collection for the CPO/PIT output.
+
+For the revised production workflow:
+
+- the primary model is therefore fitted with `cpo = FALSE`;
+- failure of CPO result collection is **not** treated as evidence that the model
+  fit itself failed;
+- CPO/PIT, if retried, should be run as a separate HPC job so that the primary
+  model does not depend on successful cross-validation output collection.
+
+A template is retained below but is not evaluated when knitting.
+
+```{r reviewer-cpo-template, eval=FALSE}
+# LOCAL SAFETY: disabled additional INLA refit (e.g., CPO/PIT attempt).
+# fit_chik_nb_cpo <- inla(
+#   formula_chik,
+#   family = "nbinomial",
+#   data = panel_chik_2016_2025,
+#   control.predictor = list(
+#     compute = TRUE,
+#     link = 1
+#   ),
+#   control.compute = list(
+#     dic = TRUE,
+#     waic = TRUE,
+#     cpo = TRUE,
+#     mlik = FALSE,
+#     return.marginals = FALSE,
+#     openmp.strategy = "huge"
+#   ),
+#   num.threads = "1:1",
+#   verbose = TRUE
+# )
+```
+
+## 16.11 Exclusion of 2020-2021
+
+The exclusion sensitivity uses the same NB likelihood, BYM2 spatial effect,
+monthly RW2 temporal effect, freely estimated `log(POP)` coefficient, and Type I
+interaction as the primary model.
+
+The 2020-2021 observations are excluded while the RW2 retains the original
+calendar-time index. Thus the pandemic interval remains a 24-month gap rather
+than being compressed out of the latent time scale.
+
+When the saved exclusion fit is present, the following block compares the
+population coefficient, spatial mixing parameter, and spatial field with the
+primary model.
+
+```{r reviewer-exclusion-comparison}
+excl_path <- file.path(
+  results_dir,
+  "fit_chik_nb_excl2020_2021.rds"
+)
+
+if (file.exists(excl_path)) {
+
+  fit_excl <- readRDS(
+    excl_path
+  )
+
+  cat(
+    "Primary log(POP):",
+    fit_chik_nb$summary.fixed[
+      "log(POP)", "mean"
+    ],
+    "\n"
+  )
+
+  cat(
+    "Excluding 2020-2021 log(POP):",
+    fit_excl$summary.fixed[
+      "log(POP)", "mean"
+    ],
+    "\n"
+  )
+
+  cat(
+    "Primary phi:",
+    fit_chik_nb$summary.hyperpar[
+      "Phi for space", "mean"
+    ],
+    "\n"
+  )
+
+  cat(
+    "Excluding 2020-2021 phi:",
+    fit_excl$summary.hyperpar[
+      "Phi for space", "mean"
+    ],
+    "\n"
+  )
+
+  spatial_excl <- fit_excl$summary.random$space %>%
+    filter(
+      ID <= length(space_levels)
+    ) %>%
+    transmute(
+      space = ID,
+      spatial_mean_excl = mean,
+      code_muni =
+        space_levels[space]
+    )
+
+  spatial_compare <- spatial_effect %>%
+    select(
+      code_muni,
+      spatial_mean
+    ) %>%
+    inner_join(
+      spatial_excl %>%
+        select(
+          code_muni,
+          spatial_mean_excl
+        ),
+      by = "code_muni"
+    )
+
+  cat(
+    "Spatial-effect correlation:",
+    cor(
+      spatial_compare$spatial_mean,
+      spatial_compare$spatial_mean_excl,
+      use = "complete.obs"
+    ),
+    "\n"
+  )
+}
+```
+
+
+### 16.11.1 Macro-regional shift after excluding 2020-2021
+
+Ana's revision plan asks not only whether the spatial structure is stable, but
+also whether the substantive macro-regional reconfiguration remains after
+excluding the pandemic-disruption years.
+
+No new INLA fit is required here. The saved exclusion fit is post-processed
+with exactly the same fitted-incidence and macro-region definitions used for
+the primary model. Comparisons are restricted to the retained calendar years
+(2016-2019 and 2022-2025).
+
+The summary reports:
+
+- Pearson correlation of primary versus exclusion-model region-year
+  `median_logIRR`;
+- Spearman rank correlation of region-year relative-incidence summaries;
+- agreement in the highest-relative-incidence macro-region for each retained
+  year;
+- a compact 2024-2025 table, because the late Central-West expansion is the
+  headline geographic shift relevant to the revision.
+
+```{r reviewer-exclusion-macroregion-comparison}
+if (file.exists(excl_path)) {
+
+  if (!exists("fit_excl")) {
+    fit_excl <- readRDS(excl_path)
+  }
+
+  panel_excl <- panel_chik_full %>%
+    filter(!year %in% c(2020L, 2021L)) %>%
+    arrange(time, space)
+
+  stopifnot(
+    nrow(panel_excl) ==
+      nrow(fit_excl$summary.fitted.values)
+  )
+
+  st_rate_excl <- extract_total_lograte(
+    fit_excl,
+    panel_excl,
+    per = 1e5
+  )
+
+  nat_rate_median_excl <- st_rate_excl %>%
+    group_by(ym_date) %>%
+    summarise(
+      nat_rate = median(
+        rate_per,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    )
+
+  st_rate_excl_region <- st_rate_excl %>%
+    mutate(
+      code_state =
+        substr(code_muni, 1, 2)
+    ) %>%
+    left_join(
+      state_region_lookup,
+      by = "code_state"
+    ) %>%
+    filter(!is.na(region)) %>%
+    left_join(
+      nat_rate_median_excl,
+      by = "ym_date"
+    ) %>%
+    mutate(
+      IRR = rate_per / nat_rate,
+      log_IRR = log(IRR),
+      year = lubridate::year(ym_date)
+    )
+
+  region_year_excl <- st_rate_excl_region %>%
+    group_by(region, year) %>%
+    summarise(
+      median_logIRR_excl =
+        median(
+          log_IRR,
+          na.rm = TRUE
+        ),
+      .groups = "drop"
+    )
+
+  region_year_primary_retained <-
+    region_year_irr %>%
+    filter(
+      !year %in% c(2020L, 2021L)
+    ) %>%
+    transmute(
+      region = as.character(region),
+      year,
+      median_logIRR_primary =
+        median_logIRR
+    )
+
+  region_year_compare <-
+    region_year_primary_retained %>%
+    inner_join(
+      region_year_excl %>%
+        mutate(
+          region =
+            as.character(region)
+        ),
+      by = c("region", "year")
+    ) %>%
+    mutate(
+      rank_primary =
+        min_rank(
+          desc(
+            median_logIRR_primary
+          )
+        ),
+      rank_excl =
+        min_rank(
+          desc(
+            median_logIRR_excl
+          )
+        )
+    )
+
+  stopifnot(
+    nrow(region_year_compare) ==
+      5L * 8L
+  )
+
+  macroregion_summary <- tibble(
+    metric = c(
+      "Pearson correlation of region-year median log(IRR)",
+      "Spearman correlation of region-year median log(IRR)"
+    ),
+    value = c(
+      cor(
+        region_year_compare$
+          median_logIRR_primary,
+        region_year_compare$
+          median_logIRR_excl,
+        method = "pearson",
+        use = "complete.obs"
+      ),
+      cor(
+        region_year_compare$
+          median_logIRR_primary,
+        region_year_compare$
+          median_logIRR_excl,
+        method = "spearman",
+        use = "complete.obs"
+      )
+    )
+  )
+
+  print(macroregion_summary)
+
+  top_region_primary <-
+    region_year_compare %>%
+    group_by(year) %>%
+    slice_max(
+      median_logIRR_primary,
+      n = 1,
+      with_ties = FALSE
+    ) %>%
+    ungroup() %>%
+    select(
+      year,
+      top_region_primary = region
+    )
+
+  top_region_excl <-
+    region_year_compare %>%
+    group_by(year) %>%
+    slice_max(
+      median_logIRR_excl,
+      n = 1,
+      with_ties = FALSE
+    ) %>%
+    ungroup() %>%
+    select(
+      year,
+      top_region_excl = region
+    )
+
+  annual_top_region_compare <-
+    top_region_primary %>%
+    left_join(
+      top_region_excl,
+      by = "year"
+    ) %>%
+    mutate(
+      same_top_region =
+        top_region_primary ==
+        top_region_excl
+    )
+
+  print(annual_top_region_compare)
+
+  cat(
+    "Annual top-region agreement:",
+    sum(
+      annual_top_region_compare$
+        same_top_region
+    ),
+    "of",
+    nrow(
+      annual_top_region_compare
+    ),
+    "retained years\n"
+  )
+
+  late_shift_compare <-
+    region_year_compare %>%
+    filter(year %in% 2024:2025) %>%
+    group_by(year) %>%
+    mutate(
+      rank_primary =
+        rank(
+          -median_logIRR_primary,
+          ties.method = "first"
+        ),
+      rank_excl =
+        rank(
+          -median_logIRR_excl,
+          ties.method = "first"
+        )
+    ) %>%
+    ungroup() %>%
+    arrange(
+      year,
+      rank_primary
+    )
+
+  print(late_shift_compare)
+
+  readr::write_csv(
+    region_year_compare,
+    file.path(
+      results_dir,
+      "exclude2020_2021_macroregion_region_year_comparison.csv"
+    )
+  )
+
+  readr::write_csv(
+    annual_top_region_compare,
+    file.path(
+      results_dir,
+      "exclude2020_2021_macroregion_top_region_by_year.csv"
+    )
+  )
+
+  readr::write_csv(
+    late_shift_compare,
+    file.path(
+      results_dir,
+      "exclude2020_2021_macroregion_2024_2025.csv"
+    )
+  )
+
+  readr::write_csv(
+    macroregion_summary,
+    file.path(
+      results_dir,
+      "exclude2020_2021_macroregion_summary.csv"
+    )
+  )
+
+  cat(
+    "\nPandemic-exclusion macro-region comparison complete.\n"
+  )
+}
+```
+
+```{r reviewer-exclusion-macroregion-figure}
+if (
+  exists("region_year_compare") &&
+    nrow(region_year_compare) > 0L
+) {
+
+  p_excl_macroregion <- ggplot(
+    region_year_compare,
+    aes(
+      x = median_logIRR_primary,
+      y = median_logIRR_excl,
+      shape = region
+    )
+  ) +
+    geom_point(size = 2.4) +
+    geom_abline(
+      slope = 1,
+      intercept = 0,
+      linetype = "dashed",
+      linewidth = 0.5
+    ) +
+    labs(
+      x = "Primary model: region-year median log(IRR)",
+      y = "Excluding 2020-2021: region-year median log(IRR)",
+      shape = "Macro-region"
+    ) +
+    theme_classic(base_size = 10) +
+    theme(
+      legend.position = "bottom"
+    )
+
+  print(p_excl_macroregion)
+
+  ggsave(
+    file.path(
+      results_dir,
+      "exclude2020_2021_macroregion_stability.png"
+    ),
+    p_excl_macroregion,
+    width = 6.8,
+    height = 5.2,
+    dpi = 600,
+    bg = "white"
+  )
+
+  ggsave(
+    file.path(
+      results_dir,
+      "exclude2020_2021_macroregion_stability.pdf"
+    ),
+    p_excl_macroregion,
+    width = 6.8,
+    height = 5.2
+  )
+}
+```
+
+## 16.12 Structured interaction sensitivity: final workflow
+
+The clean structured-interaction comparison retains the same BYM2 spatial main
+effect and RW2 temporal main effect in both models and changes only the
+space-time interaction.
+
+The final structured comparison is scoped to Center-West for computational
+feasibility.
+
+The preferred implementation is the explicit Knorr-Held Type IV interaction via
+`INLA::inla.knmodels(type = 4)`, as shown in Section 12.
+
+An earlier exploratory grouped-BYM2 formulation is archived as development
+history only and should not be used for the final Type I versus Type IV
+interpretation because it did not isolate the interaction structure as cleanly.
+
+If both final saved Center-West fits are available, compare them here:
+
+```{r reviewer-type1-type4-results}
+type1_path <- file.path(
+  results_dir,
+  "fit_cw_type1_2016_2025.rds"
+)
+
+type4_path <- file.path(
+  results_dir,
+  "fit_cw_type4_2016_2025.rds"
+)
+
+if (
+  file.exists(type1_path) &&
+  file.exists(type4_path)
+) {
+
+  fit_cw_type1 <- readRDS(
+    type1_path
+  )
+
+  fit_cw_type4 <- readRDS(
+    type4_path
+  )
+
+  type_compare <- tibble::tibble(
+    model = c(
+      "Center-West Type I",
+      "Center-West Type IV"
+    ),
+    DIC = c(
+      fit_cw_type1$dic$dic,
+      fit_cw_type4$dic$dic
+    ),
+    WAIC = c(
+      fit_cw_type1$waic$waic,
+      fit_cw_type4$waic$waic
+    )
+  )
+
+  print(type_compare)
+}
+
+```
+
+The interaction sensitivity should be interpreted together with convergence and
+boundary diagnostics, not by DIC/WAIC alone. The purpose is to determine
+whether the substantive spatial conclusions depend on the IID Type I
+interaction specification.
+
+# 17. HPC production workflow and model-development record
+
+## 17.1 Final 2016-2025 primary fit
+
+The clean production fit completed successfully on Cornell Seneca:
+
+- R 4.6.0;
+- INLA 26.8.7;
+- 668,400 municipality-month observations;
+- 5,570 municipalities;
+- 120 months;
+- elapsed time: 2 h 45 min 59 s;
+- peak memory: approximately 15.8 GB;
+- exit code: 0.
+
+The earlier diagnostic 2016-2025 fit completed in essentially the same runtime,
+which provided an independent scale check before the clean production run.
+
+## 17.2 Why the analysis window changed from 2015-2025 to 2016-2025
+
+The original 2015-2025 analysis contained:
+
+- 132 months;
+- 735,240 municipality-month observations;
+- 735,240 Type I interaction levels.
+
+The full model repeatedly failed at the INLA backend despite extensive
+troubleshooting.
+
+The diagnostic sequence included:
+
+- 2015 only;
+- 2015-2017;
+- 2015-2022;
+- 2015-2024;
+- 2016-2025;
+- disabling DIC/WAIC and other optional outputs;
+- upgrading to R 4.6.0 / INLA 26.8.7;
+- warm-starting from the successful 2016-2025 hyperparameter mode;
+- fixing hyperparameters at the 2016-2025 estimates;
+- testing a full Poisson likelihood;
+- threshold-size runs between 120 and 132 months.
+
+The full 2015-2025 model failed even with fixed theta and also failed under
+Poisson. This made it unlikely that the failure was caused solely by
+negative-binomial overdispersion, optional model-fit statistics, poor starting
+values, or insufficient RAM.
+
+The revised analysis therefore uses 2016-2025 while preserving the original
+monthly Type I interaction rather than changing the scientific model solely to
+make the 132-month computation easier.
+
+## 17.3 Zero-case municipality-months
+
+A central data-structure revision was to build the full municipality-month grid
+first and then join confirmed cases.
+
+Therefore:
+
+- municipality-months with no confirmed chikungunya record are coded `0`;
+- genuine unavailable covariate information remains missing;
+- municipalities are not selected into the model based on whether a case was
+  observed.
+
+This decision is part of the final analysis, not a computational shortcut.
+
+## 17.4 Population handling
+
+The original offset formulation imposed a population coefficient of exactly 1.
+The reviewer correctly identified this as a substantive assumption.
+
+The final model estimates the coefficient of `log(POP)` freely and uses annual
+municipality population estimates. The resulting coefficient of 1.242 (95% CrI
+1.198-1.287) is inconsistent with proportional scaling, so the revised model
+does not use a population offset.
+
+## 17.5 Sensitivity analyses retained in the INLA workflow
+
+The final INLA sensitivity set is:
+
+1. Poisson instead of negative binomial, with all latent components unchanged.
+2. Exclusion of 2020-2021 while retaining the original RW2 calendar index.
+3. Center-West Type I versus structured Type IV interaction.
+4. Residual and interaction spatial-autocorrelation diagnostics.
+5. Prior-versus-posterior diagnostics for the PC priors.
+6. CPO/PIT attempted separately because full-model result collection was
+   computationally unstable.
+
+These analyses are all kept in this INLA Rmd because they are direct validation
+or sensitivity checks of the same Bayesian spatiotemporal model.
+
+
+```{r}
+
+# Figure 3A: BYM2 persistent spatial effect
+panel_3A <- ggplot(muni_spatial) +
+  geom_sf(
+    aes(fill = spatial_mean),
+    color = NA
+  ) +
+  geom_sf(
+    data = geobr::read_state(
+      year = 2020,
+      showProgress = FALSE
+    ),
+    fill = NA,
+    color = "grey55",
+    linewidth = 0.18,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_gradient2(
+    low = "#B2182B",
+    mid = "#F7F7F7",
+    high = "#2166AC",
+    midpoint = 0,
+    name = "Spatial effect"
+  ) +
+  labs(
+    title = "Persistent spatial effect"
+  ) +
+  theme_void(base_size = 10) +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 12
+    ),
+    legend.position = "right"
+  )
+
+panel_3A
+
+# Figure 3B: RW2 temporal effect
+
+panel_3B <- ggplot(
+  temporal_effect,
+  aes(
+    x = ym_date,
+    y = temporal_mean
+  )
+) +
+  geom_line(
+    linewidth = 0.9,
+    color = "black"
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.4
+  ) +
+  scale_x_date(
+    date_breaks = "1 year",
+    date_labels = "%Y"
+  ) +
+  scale_x_date(
+  limits = c(
+    as.Date("2016-01-01"),
+    as.Date("2025-12-31")
+  ),
+  date_breaks = "1 year",
+  date_labels = "%Y",
+  expand = c(0, 0)
+  ) + 
+  labs(
+    title = "National temporal effect",
+    x = "Year",
+    y = "RW2 temporal effect"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 12
+    ),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    )
+  )
+
+panel_3B <- panel_3B +
+  theme(
+    plot.margin = margin(
+      t = 5,
+      r = 0,
+      b = 5,
+      l = 0
+    )
+  )
+
+panel_3B
+
+# Figure 3C:
+# Change in modeled relative incidence:
+# 2024-2025 versus 2016-2017
+
+period_change <- st_rate_chik_region %>%
+  mutate(
+    period = case_when(
+      lubridate::year(ym_date) %in% 2016:2017 ~ "2016–2017",
+      lubridate::year(ym_date) %in% 2024:2025 ~ "2024–2025",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(period)) %>%
+  group_by(code_muni, period) %>%
+  summarise(
+    median_logIRR = median(log_IRR, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = period,
+    values_from = median_logIRR
+  ) %>%
+  mutate(
+    delta_logIRR =
+      `2024–2025` - `2016–2017`
+  )
+
+change_sf <- muni_sf %>%
+  select(code_muni, geometry) %>%
+  left_join(
+    period_change,
+    by = "code_muni"
+  )
+
+q_change <- quantile(
+  abs(change_sf$delta_logIRR),
+  0.98,
+  na.rm = TRUE
+)
+
+states_sf_plot <- geobr::read_state(
+  year = 2020,
+  showProgress = FALSE
+)
+
+panel_3C <- ggplot(change_sf) +
+  geom_sf(
+    aes(fill = delta_logIRR),
+    color = NA
+  ) +
+  geom_sf(
+    data = states_sf_plot,
+    fill = NA,
+    color = "grey55",
+    linewidth = 0.18
+  ) +
+  scale_fill_gradient2(
+    low = "#B2182B",
+    mid = "#F7F7F7",
+    high = "#2166AC",
+    midpoint = 0,
+    limits = c(-q_change, q_change),
+    oob = scales::squish,
+    name = expression("Change in log relative incidence")
+  ) +
+  labs(
+    title = "Change in modeled relative incidence",
+    subtitle = "2024–2025 versus 2016–2017"
+  ) +
+  theme_void(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right"
+  )
+
+panel_3C
+
+delta_region_summary <- period_change %>%
+  mutate(
+    code_state = substr(code_muni, 1, 2)
+  ) %>%
+  left_join(
+    state_region_lookup,
+    by = "code_state"
+  ) %>%
+  group_by(region) %>%
+  summarise(
+    median_delta = median(delta_logIRR, na.rm = TRUE),
+    q25 = quantile(delta_logIRR, 0.25, na.rm = TRUE),
+    q75 = quantile(delta_logIRR, 0.75, na.rm = TRUE),
+    prop_increase = mean(delta_logIRR > 0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(median_delta))
+
+delta_region_summary
+
+
+library(patchwork)
+
+figure3 <- (panel_3A | panel_3C) /
+           panel_3B +
+  plot_layout(
+    heights = c(1.0, 0.55)
+  ) +
+  plot_annotation(
+    tag_levels = "A"
+  ) &
+  theme(
+    plot.tag = element_text(
+      face = "bold",
+      size = 13
+    )
+  )
+
+figure3
+
+temporal_summary <- temporal_effect %>%
+  arrange(ym_date) %>%
+  summarise(
+    max_effect = max(temporal_mean, na.rm = TRUE),
+    max_date = ym_date[which.max(temporal_mean)],
+    min_effect = min(temporal_mean, na.rm = TRUE),
+    min_date = ym_date[which.min(temporal_mean)]
+  )
+
+temporal_summary
+temporal_yearly <- temporal_effect %>%
+  mutate(year = lubridate::year(ym_date)) %>%
+  group_by(year) %>%
+  slice_max(
+    temporal_mean,
+    n = 1,
+    with_ties = FALSE
+  ) %>%
+  ungroup() %>%
+  select(
+    year,
+    peak_month = ym_date,
+    peak_effect = temporal_mean
+  )
+
+temporal_yearly
+temporal_effect %>%
+  arrange(desc(temporal_mean)) %>%
+  slice_head(n = 10)
+
+
+
+#Table 1
+
+table1 <- tibble::tribble(
+  ~Parameter, ~`Posterior mean`, ~`95% CrI`,
+  "Intercept", "-16.030", "-16.465 to -15.596",
+  "log(Population)", "1.242", "1.198 to 1.287",
+  "Negative-binomial size", "0.169", "0.165 to 0.173",
+  "Spatial precision", "0.235", "0.217 to 0.256",
+  "BYM2 mixing parameter, \u03c6", "0.788", "0.735 to 0.828",
+  "Temporal precision", "3.823", "2.838 to 5.220",
+  "Space-time interaction precision", "0.564", "0.546 to 0.584"
+)
+
+table1
+
+
+
+cat("\n=== TYPE I FIXED EFFECTS ===\n")
+print(fit_cw_type1$summary.fixed)
+
+cat("\n=== TYPE IV FIXED EFFECTS ===\n")
+print(fit_cw_type4$summary.fixed)
+
+cat("\n=== TYPE I HYPERPARAMETERS ===\n")
+print(fit_cw_type1$summary.hyperpar)
+
+cat("\n=== TYPE IV HYPERPARAMETERS ===\n")
+print(fit_cw_type4$summary.hyperpar)
+```
+
+
+
+
+# 18. Session information
+
+```{r session-info}
+cat("R version:", R.version.string, "\n")
+cat("INLA version:", as.character(packageVersion("INLA")), "\n")
+print(Sys.info()[c("sysname", "release", "machine")])
+```

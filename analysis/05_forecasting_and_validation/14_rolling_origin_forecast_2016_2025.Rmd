@@ -1,0 +1,693 @@
+---
+title: "14 - Rolling-Origin One-Year-Ahead Forecast, 2017-2025"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+This file is the complete rolling-origin forecast analysis. It preferentially reads saved analytic objects, but can reuse objects already present in the current R session and can rebuild the 2020 municipality geometry/adjacency graph if needed.
+
+It reads the saved analytic objects directly from RDS files, then performs nine one-year-ahead folds:
+
+- train through 2016 -> predict 2017
+- train through 2017 -> predict 2018
+- ...
+- train through 2024 -> predict 2025
+
+Existing prediction CSVs are detected and skipped automatically. If a fit RDS exists but its prediction CSV is missing, the saved fit is loaded and the prediction is extracted without refitting.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(stringr)
+  library(lubridate)
+  library(sf)
+  library(spdep)
+  library(INLA)
+})
+
+STUDY_START <- 2016L
+STUDY_END   <- 2025L
+TARGET_YEARS <- 2017:2025
+EXPECTED_N_MUNI <- 5570L
+
+# Main output location used throughout the revision.
+RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+ROLL_DIR <- file.path(RESULT_ROOT, "rolling_origin")
+FIT_DIR <- file.path(ROLL_DIR, "fits")
+PRED_DIR <- file.path(ROLL_DIR, "predictions")
+
+dir.create(FIT_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(PRED_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# Saved-input search locations.
+# The helper checks the project working directory first, then the revision
+# results folder. Add another directory here if you keep the RDS files elsewhere.
+INPUT_DIRS <- unique(c(
+  normalizePath(".", winslash = "/", mustWork = FALSE),
+  path.expand("~/Downloads/inla_results"),
+  path.expand("~/Downloads")
+))
+
+find_input <- function(filename) {
+  candidates <- file.path(INPUT_DIRS, filename)
+  hit <- candidates[file.exists(candidates)]
+  if (length(hit) == 0L) {
+    stop(
+      "Required input not found: ", filename, "\n",
+      "Searched:\n", paste(candidates, collapse = "\n")
+    )
+  }
+  normalizePath(hit[1], winslash = "/", mustWork = TRUE)
+}
+
+cat("Rolling-origin forecast years:", paste(TARGET_YEARS, collapse = ", "), "\n")
+cat("Fit directory:", FIT_DIR, "\n")
+cat("Prediction directory:", PRED_DIR, "\n")
+```
+
+# 1. Read saved analytic objects
+
+Preferred saved files:
+
+- `Chik_total.rds`
+- `pop_panel_total.rds`
+- `muni_sf_2020.rds`
+- `brazil_muni_2020.adj`
+
+`Chik_total` and `pop_panel_total` may instead come from the current R session. The municipality geometry and adjacency graph are rebuilt when saved versions are unavailable.
+
+```{r load-saved-inputs}
+# Prefer saved objects so this notebook can be resumed independently.
+# If they are absent, use objects already present in the current R session.
+# Municipality geometry and adjacency can be rebuilt from geobr if needed.
+
+load_or_session <- function(filename, object_name) {
+  candidates <- file.path(INPUT_DIRS, filename)
+  hit <- candidates[file.exists(candidates)]
+
+  if (length(hit) > 0L) {
+    path <- normalizePath(hit[1], winslash = "/", mustWork = TRUE)
+    cat(object_name, "loaded from:", path, "
+")
+    return(readRDS(path))
+  }
+
+  if (exists(object_name, envir = .GlobalEnv, inherits = FALSE)) {
+    cat(object_name, "reused from current R session.
+")
+    return(get(object_name, envir = .GlobalEnv))
+  }
+
+  stop(
+    "Required input unavailable: ", object_name,
+    ". Looked for ", filename,
+    " in INPUT_DIRS and in the current R session."
+  )
+}
+
+Chik_total <- load_or_session("Chik_total.rds", "Chik_total")
+pop_panel_total <- load_or_session("pop_panel_total.rds", "pop_panel_total")
+
+muni_candidates <- file.path(INPUT_DIRS, "muni_sf_2020.rds")
+muni_hit <- muni_candidates[file.exists(muni_candidates)]
+
+if (length(muni_hit) > 0L) {
+  muni_sf <- readRDS(muni_hit[1])
+  cat("Municipality geometry loaded from:", muni_hit[1], "
+")
+} else if (exists("muni_sf", envir = .GlobalEnv, inherits = FALSE)) {
+  muni_sf <- get("muni_sf", envir = .GlobalEnv)
+  cat("Municipality geometry reused from current R session.
+")
+} else {
+  cat("muni_sf_2020.rds not found; rebuilding 2020 municipality geometry with geobr.
+")
+  muni_sf <- geobr::read_municipality(
+    year = 2020,
+    showProgress = FALSE
+  ) %>%
+    sf::st_make_valid()
+}
+
+muni_sf <- muni_sf %>%
+  mutate(
+    code_muni = str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  )
+
+space_levels <- muni_sf$code_muni
+
+stopifnot(
+  length(space_levels) == EXPECTED_N_MUNI,
+  !anyDuplicated(space_levels),
+  all(Chik_total$CLASSI_FIN %in% c(1, 13)),
+  n_distinct(pop_panel_total$code_muni) == EXPECTED_N_MUNI
+)
+
+graph_candidates <- file.path(INPUT_DIRS, "brazil_muni_2020.adj")
+graph_hit <- graph_candidates[file.exists(graph_candidates)]
+
+if (length(graph_hit) > 0L) {
+  g <- INLA::inla.read.graph(graph_hit[1])
+  cat("Adjacency graph loaded from:", graph_hit[1], "
+")
+} else {
+  graph_path <- file.path(ROLL_DIR, "brazil_muni_2020.adj")
+  cat("Adjacency graph not found; rebuilding at:", graph_path, "
+")
+
+  nb <- spdep::poly2nb(
+    muni_sf,
+    queen = TRUE
+  )
+
+  spdep::nb2INLA(
+    file = graph_path,
+    nb = nb
+  )
+
+  g <- INLA::inla.read.graph(graph_path)
+}
+
+cat("Municipalities in fixed 2020 spatial universe:", length(space_levels), "
+")
+```
+
+# 2. Standardize population panel
+
+```{r population-panel}
+pop_panel_total_std <- pop_panel_total %>%
+  transmute(
+    code_muni = str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    year = as.integer(year),
+    POP = as.numeric(total_pop)
+  ) %>%
+  filter(
+    year %in% STUDY_START:STUDY_END,
+    code_muni %in% space_levels
+  )
+
+stopifnot(
+  nrow(pop_panel_total_std) == EXPECTED_N_MUNI * length(STUDY_START:STUDY_END),
+  n_distinct(pop_panel_total_std$code_muni) == EXPECTED_N_MUNI,
+  n_distinct(pop_panel_total_std$year) == length(STUDY_START:STUDY_END),
+  !anyDuplicated(pop_panel_total_std[c("code_muni", "year")]),
+  sum(is.na(pop_panel_total_std$POP)) == 0L,
+  sum(pop_panel_total_std$POP <= 0) == 0L
+)
+
+cat("Population rows:", nrow(pop_panel_total_std), "\n")
+```
+
+# 3. Build the complete 2016-2025 municipality-month panel
+
+Zero observed notifications remain zero in the complete grid, matching the primary model.
+
+```{r full-panel}
+all_months <- seq(
+  as.Date(sprintf("%d-01-01", STUDY_START)),
+  as.Date(sprintf("%d-12-01", STUDY_END)),
+  by = "month"
+)
+
+confirmed_monthly <- Chik_total %>%
+  transmute(
+    code_muni = str_pad(
+      substr(as.character(ID_MUNICIP), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    ym_date = floor_date(as.Date(DT_SIN_PRI), unit = "month"),
+    is_confirmed = CLASSI_FIN %in% c(1, 13)
+  ) %>%
+  filter(
+    is_confirmed,
+    !is.na(code_muni),
+    !is.na(ym_date),
+    ym_date >= min(all_months),
+    ym_date <= max(all_months),
+    code_muni %in% space_levels
+  ) %>%
+  count(code_muni, ym_date, name = "cases")
+
+panel_full <- tidyr::crossing(
+  ym_date = all_months,
+  code_muni = space_levels
+) %>%
+  mutate(year = lubridate::year(ym_date)) %>%
+  left_join(
+    confirmed_monthly,
+    by = c("code_muni", "ym_date")
+  ) %>%
+  mutate(
+    cases = replace_na(cases, 0L)
+  ) %>%
+  left_join(
+    pop_panel_total_std,
+    by = c("code_muni", "year")
+  ) %>%
+  arrange(ym_date, code_muni)
+
+stopifnot(
+  nrow(panel_full) == EXPECTED_N_MUNI * 120L,
+  n_distinct(panel_full$code_muni) == EXPECTED_N_MUNI,
+  sum(is.na(panel_full$POP)) == 0L,
+  sum(panel_full$POP <= 0) == 0L
+)
+
+cat("Full 2016-2025 panel rows:", nrow(panel_full), "\n")
+cat("Confirmed cases in panel:", sum(panel_full$cases), "\n")
+```
+
+# 4. Model specification
+
+This mirrors the primary negative-binomial model:
+
+- free `log(POP)` coefficient
+- BYM2 municipality spatial effect
+- RW2 monthly temporal effect
+- IID municipality-month interaction
+
+```{r model-formula}
+forecast_formula <- cases ~
+  log(POP) +
+  f(
+    space,
+    model = "bym2",
+    graph = g,
+    scale.model = TRUE,
+    hyper = list(
+      prec = list(
+        prior = "pc.prec",
+        param = c(1, 0.01)
+      ),
+      phi = list(
+        prior = "pc",
+        param = c(0.5, 2/3)
+      )
+    )
+  ) +
+  f(
+    time,
+    model = "rw2",
+    constr = TRUE,
+    hyper = list(
+      prec = list(
+        prior = "pc.prec",
+        param = c(1, 0.01)
+      )
+    )
+  ) +
+  f(
+    st_id,
+    model = "iid",
+    hyper = list(
+      prec = list(
+        prior = "pc.prec",
+        param = c(2, 0.01)
+      )
+    )
+  )
+```
+
+# 5. Build one rolling-origin fold
+
+For target year `t`, all years before `t` are observed and the entire target year is set to `NA`. INLA therefore produces fitted/predictive summaries for the held-out target year.
+
+```{r build-fold-function}
+build_forecast_fold <- function(target_year) {
+
+  stopifnot(target_year %in% TARGET_YEARS)
+
+  fold <- panel_full %>%
+    filter(year <= target_year) %>%
+    mutate(
+      cases_actual = cases,
+      cases = if_else(
+        year == target_year,
+        NA_integer_,
+        as.integer(cases)
+      )
+    ) %>%
+    arrange(ym_date, code_muni)
+
+  fold_months <- sort(unique(fold$ym_date))
+
+  fold <- fold %>%
+    mutate(
+      space = match(code_muni, space_levels),
+      time = match(ym_date, fold_months)
+    )
+
+  n_space <- length(space_levels)
+
+  fold <- fold %>%
+    mutate(
+      st_id = (time - 1L) * n_space + space
+    )
+
+  expected_train_rows <-
+    EXPECTED_N_MUNI * 12L * (target_year - STUDY_START)
+
+  expected_forecast_rows <-
+    EXPECTED_N_MUNI * 12L
+
+  stopifnot(
+    sum(!is.na(fold$cases)) == expected_train_rows,
+    sum(is.na(fold$cases)) == expected_forecast_rows,
+    !anyNA(fold$space),
+    !anyNA(fold$time),
+    !anyNA(fold$st_id),
+    !anyNA(fold$POP)
+  )
+
+  fold
+}
+```
+
+# 6. Fit or recover one target year
+
+This function is resumable:
+
+1. If the prediction CSV already exists, it is read and returned.
+2. If the prediction is missing but the fit RDS exists, the fit is loaded and the prediction is extracted.
+3. Only if neither exists is INLA fitted again.
+
+```{r fit-one-fold-function}
+fit_one_fold <- function(target_year) {
+
+  fit_path <- file.path(
+    FIT_DIR,
+    sprintf("fit_rolling_predict_%d.rds", target_year)
+  )
+
+  pred_path <- file.path(
+    PRED_DIR,
+    sprintf("forecast_annual_predict_%d.csv", target_year)
+  )
+
+  # ----------------------------------------------------------
+  # A. Prediction already exists: do not refit.
+  # ----------------------------------------------------------
+  if (file.exists(pred_path)) {
+
+    cat(
+      "\nPrediction already exists for",
+      target_year,
+      "- skipping fit.\n"
+    )
+
+    return(
+      readr::read_csv(
+        pred_path,
+        show_col_types = FALSE,
+        col_types = cols(
+          code_muni = col_character(),
+          .default = col_guess()
+        )
+      ) %>%
+        mutate(
+          code_muni = str_pad(
+            substr(as.character(code_muni), 1, 6),
+            6,
+            pad = "0"
+          ),
+          target_year = as.integer(target_year)
+        )
+    )
+  }
+
+  cat("\n============================================================\n")
+  cat("FITTING TARGET YEAR:", target_year, "\n")
+  cat(
+    "Training window:",
+    STUDY_START,
+    "-",
+    target_year - 1L,
+    "\n"
+  )
+
+  fold <- build_forecast_fold(target_year)
+
+  cat("Training rows:", sum(!is.na(fold$cases)), "\n")
+  cat("Forecast rows:", sum(is.na(fold$cases)), "\n")
+  cat("============================================================\n\n")
+
+  # ----------------------------------------------------------
+  # B. Load existing fit if available.
+  # ----------------------------------------------------------
+  if (file.exists(fit_path)) {
+
+    cat(
+      "Fit RDS already exists for",
+      target_year,
+      "- loading saved fit and extracting prediction.\n"
+    )
+
+    fit <- readRDS(fit_path)
+
+  } else {
+
+    cat("No saved fit found; starting INLA.\n")
+    print(Sys.time())
+
+    fit <- INLA::inla(
+      forecast_formula,
+      family = "nbinomial",
+      data = fold,
+
+      control.predictor = list(
+        compute = TRUE,
+        link = 1
+      ),
+
+      control.compute = list(
+        dic = FALSE,
+        waic = FALSE,
+        cpo = FALSE,
+        mlik = FALSE,
+        return.marginals = FALSE,
+        return.marginals.predictor = FALSE,
+        openmp.strategy = "huge"
+      ),
+
+      num.threads = "1:1",
+      verbose = TRUE
+    )
+
+    saveRDS(
+      fit,
+      fit_path,
+      compress = FALSE
+    )
+
+    cat("Saved fit:", fit_path, "\n")
+  }
+
+  # ----------------------------------------------------------
+  # C. Extract target-year annual forecast.
+  # ----------------------------------------------------------
+  stopifnot(
+    nrow(fit$summary.fitted.values) == nrow(fold)
+  )
+
+  target_pred <- fold %>%
+    mutate(
+      fitted_mean = fit$summary.fitted.values$mean
+    ) %>%
+    filter(year == target_year) %>%
+    group_by(code_muni) %>%
+    summarise(
+      target_year = target_year,
+      forecast_annual = sum(fitted_mean),
+      forecast_monthly_max = max(fitted_mean),
+      forecast_all_finite = all(is.finite(fitted_mean)),
+      .groups = "drop"
+    )
+
+  stopifnot(
+    nrow(target_pred) == EXPECTED_N_MUNI,
+    n_distinct(target_pred$code_muni) == EXPECTED_N_MUNI,
+    all(target_pred$target_year == target_year)
+  )
+
+  readr::write_csv(
+    target_pred,
+    pred_path
+  )
+
+  cat("Saved annual predictions:", pred_path, "\n")
+
+  target_pred
+}
+```
+
+# 7. Run all nine folds safely
+
+A failed fold does not stop later years. Existing predictions are skipped.
+
+```{r run-primary, eval=TRUE}
+all_predictions <- list()
+
+for (yy in TARGET_YEARS) {
+
+  cat("\n\nPREDICT", yy, "\n")
+
+  all_predictions[[as.character(yy)]] <- tryCatch(
+    fit_one_fold(yy),
+    error = function(e) {
+
+      cat("\nERROR in target year", yy, ":\n")
+      cat(conditionMessage(e), "\n")
+
+      tibble(
+        code_muni = character(),
+        target_year = integer(),
+        forecast_annual = numeric(),
+        forecast_monthly_max = numeric(),
+        forecast_all_finite = logical()
+      )
+    }
+  )
+
+  gc()
+}
+```
+
+# 8. Bind prediction summaries without type conflicts
+
+```{r bind-predictions}
+prediction_summary <- all_predictions %>%
+  purrr::map(
+    ~ .x %>%
+      mutate(
+        code_muni = as.character(code_muni)
+      )
+  ) %>%
+  bind_rows()
+
+completed_years <- sort(
+  unique(prediction_summary$target_year)
+)
+
+completed_years <- completed_years[
+  completed_years %in% TARGET_YEARS
+]
+
+missing_years <- setdiff(
+  TARGET_YEARS,
+  completed_years
+)
+
+cat(
+  "Completed target years:",
+  paste(completed_years, collapse = ", "),
+  "\n"
+)
+
+cat(
+  "Missing target years:",
+  ifelse(
+    length(missing_years) == 0,
+    "none",
+    paste(missing_years, collapse = ", ")
+  ),
+  "\n"
+)
+```
+
+# 9. Disk-based completion check
+
+The prediction CSVs are the authoritative completion marker.
+
+```{r disk-check}
+pred_files_on_disk <- list.files(
+  PRED_DIR,
+  pattern = "^forecast_annual_predict_[0-9]{4}\\.csv$",
+  full.names = FALSE
+)
+
+years_on_disk <- as.integer(
+  sub(
+    "forecast_annual_predict_([0-9]{4})\\.csv",
+    "\\1",
+    pred_files_on_disk
+  )
+)
+
+years_on_disk <- sort(
+  years_on_disk[years_on_disk %in% TARGET_YEARS]
+)
+
+cat(
+  "Prediction files on disk:",
+  paste(years_on_disk, collapse = ", "),
+  "\n"
+)
+
+cat(
+  "Number of completed rolling-origin folds:",
+  length(years_on_disk),
+  "of",
+  length(TARGET_YEARS),
+  "\n"
+)
+
+cat(
+  "Still missing:",
+  ifelse(
+    length(setdiff(TARGET_YEARS, years_on_disk)) == 0,
+    "none",
+    paste(
+      setdiff(TARGET_YEARS, years_on_disk),
+      collapse = ", "
+    )
+  ),
+  "\n"
+)
+```
+
+# 10. Final status
+
+```{r final-status}
+if (length(years_on_disk) == length(TARGET_YEARS)) {
+
+  cat("\n============================================================\n")
+  cat("PRIMARY ROLLING-ORIGIN FORECAST COMPLETE\n")
+  cat("Nine target years available: 2017-2025\n")
+  cat("Proceed to File 15 for scoring and figure generation.\n")
+  cat("============================================================\n")
+
+} else {
+
+  cat("\n============================================================\n")
+  cat("ROLLING-ORIGIN FORECAST INCOMPLETE\n")
+  cat(
+    "Missing years:",
+    paste(
+      setdiff(TARGET_YEARS, years_on_disk),
+      collapse = ", "
+    ),
+    "\n"
+  )
+  cat("Rerun this file; completed prediction CSVs will be skipped.\n")
+  cat("============================================================\n")
+}
+```

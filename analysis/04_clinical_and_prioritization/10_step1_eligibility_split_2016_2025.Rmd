@@ -1,0 +1,234 @@
+---
+title: "10 - Step 1: The Eligibility Split"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+# Assumes combined_all, Chik_total from 01_data_import_cleaning.Rmd
+# state_region_lookup comes from 00_setup.R directly -- Points 1-4
+# below need nothing beyond 01 + 00.
+# Point 5 (optional draft correlation check) additionally needs
+# mun_data_recent with irr and prop_65plus from 07_priority_metric_fig2.Rmd.
+# It is skipped automatically if those objects are unavailable.
+```
+
+This file uses the 18-59 age window specified in the current revision framework as a
+programmatic eligibility stratum. It answers the descriptive question: what share of
+Brazil's observed chikungunya deaths occurred outside that age window?
+
+This file does not independently establish regulatory eligibility and should not be used
+as a source for current vaccine-label language; manuscript wording should cite the
+relevant regulatory/programmatic source directly.
+
+This is a **descriptive stratification of observed deaths by
+revision-defined age bands** -- not an estimate of preventable deaths,
+which would require efficacy and coverage assumptions.
+
+## Age-band classification
+
+```{r age-band-classification}
+chik_confirmed <- combined_all %>%
+  filter(virus == "Chikungunya", CLASSI_FIN %in% c(1, 13)) %>%
+  mutate(DT_SIN_PRI = as.Date(DT_SIN_PRI)) %>%
+  filter(DT_SIN_PRI >= as.Date("2016-01-01"), DT_SIN_PRI <= as.Date("2025-12-31"))
+
+stopifnot(
+  nrow(chik_confirmed) == nrow(Chik_total),
+  min(chik_confirmed$DT_SIN_PRI, na.rm = TRUE) >= as.Date("2016-01-01"),
+  max(chik_confirmed$DT_SIN_PRI, na.rm = TRUE) <= as.Date("2025-12-31")
+)
+
+age_band <- function(age_years) {
+  case_when(
+    is.na(age_years)        ~ NA_character_,
+    age_years < 18           ~ "under 18 (outside 18-59 window)",
+    age_years >= 18 & age_years < 60 ~ "18-59 (eligibility window)",
+    age_years >= 60           ~ "60+ (outside 18-59 window)"
+  )
+}
+
+chik_confirmed <- chik_confirmed %>%
+  mutate(
+    eligibility_band = age_band(age_years),
+    eligibility_band = factor(
+      eligibility_band,
+      levels = c("under 18 (outside 18-59 window)", "18-59 (eligibility window)", "60+ (outside 18-59 window)")
+    ),
+    year = as.integer(format(as.Date(DT_SIN_PRI), "%Y"))
+  )
+
+n_missing_age <- sum(is.na(chik_confirmed$eligibility_band))
+cat("Confirmed cases with missing/unusable age (excluded from the tabulations below):", n_missing_age, "\n")
+```
+
+## Point 1: Deaths by eligibility band, 2016-2025
+
+```{r deaths-by-band}
+deaths_by_band <- chik_confirmed %>%
+  filter(case_status == "Death", !is.na(eligibility_band)) %>%
+  count(eligibility_band, name = "deaths") %>%
+  mutate(pct = round(100 * deaths / sum(deaths), 1))
+
+print(deaths_by_band)
+
+# The headline sentence this section is meant to produce:
+pct_outside_18_59 <- deaths_by_band %>%
+  filter(eligibility_band != "18-59 (eligibility window)") %>%
+  summarise(pct = sum(pct)) %>% pull(pct)
+
+cat(sprintf(
+  "\n%.1f%% of chikungunya deaths occurred in people outside the 18-59 eligibility window used in this revision.\n",
+  pct_outside_18_59
+))
+```
+
+## Point 2: Hospitalizations by eligibility band (+ YLL if computable)
+
+```{r hosp-by-band}
+chik_confirmed <- chik_confirmed %>%
+  mutate(HOSPITALIZ = as.character(HOSPITALIZ))
+
+hosp_by_band <- chik_confirmed %>%
+  filter(HOSPITALIZ == "1", !is.na(eligibility_band)) %>%
+  count(eligibility_band, name = "hospitalizations") %>%
+  mutate(pct = round(100 * hospitalizations / sum(hospitalizations), 1))
+
+print(hosp_by_band)
+```
+
+**Years of life lost:** not computed here. YLL needs a standard life
+table (life expectancy at age of death) to convert each death into a
+years-lost figure -- there is no life-table object anywhere in this
+pipeline yet. If you want this, the cleanest source is IBGE's national
+life tables (Tabua de Mortalidade) by single year of age; Cerqueira-Silva
+et al. (already ref 14, average YLL 16.0, highest among Black
+participants at 22.0) is the existing citable benchmark to compare
+against once you have it. Flagging as not computable with current data
+rather than approximating it.
+
+## Point 3: By macro-region, and separately for the 2024-25 wave
+
+```{r by-region-and-wave}
+chik_confirmed_region <- chik_confirmed %>%
+  mutate(code_state = substr(as.character(ID_MUNICIP), 1, 2)) %>%
+  left_join(state_region_lookup, by = "code_state")
+
+deaths_by_band_region <- chik_confirmed_region %>%
+  filter(case_status == "Death", !is.na(eligibility_band), !is.na(region)) %>%
+  count(region, eligibility_band, name = "deaths") %>%
+  group_by(region) %>%
+  mutate(pct = round(100 * deaths / sum(deaths), 1)) %>%
+  ungroup()
+
+print(deaths_by_band_region)
+
+deaths_by_band_2425 <- chik_confirmed %>%
+  filter(case_status == "Death", !is.na(eligibility_band), year %in% c(2024, 2025)) %>%
+  count(eligibility_band, name = "deaths") %>%
+  mutate(pct = round(100 * deaths / sum(deaths), 1))
+
+cat("\n2024-25 wave only:\n")
+print(deaths_by_band_2425)
+```
+
+## Point 4: Additional exclusion from comorbidity contraindications
+
+A secondary descriptive check examines recorded chronic-condition fields. Because
+SINAN comorbidity fields are incomplete and do not by themselves establish regulatory
+contraindication, these variables are treated only as recorded comorbidity flags, not as
+a definitive eligibility determination. No comorbidity field is used to define the
+primary age-based split.
+
+```{r comorbidity-field-check}
+# Scan Chik_total for column names that might carry comorbidity/chronic
+# condition flags. SINAN's chikungunya notification form field names
+# vary by version -- inspect what actually exists rather than guessing.
+candidate_cols <- names(Chik_total)[
+  grepl("DOENC|COMORB|CRONIC|DIABE|HIPERT|CARDIO|RENAL|IMUNO", names(Chik_total), ignore.case = TRUE)
+]
+
+if (length(candidate_cols) == 0) {
+  cat("No comorbidity-like columns found in Chik_total by name pattern.\n")
+  cat("Full column list for manual inspection:\n")
+  print(names(Chik_total))
+} else {
+  cat("Candidate comorbidity columns found:\n")
+  print(candidate_cols)
+
+  # Check the actual value coding before assuming anything (SINAN
+  # commonly uses 1=Yes/2=No/9=Unknown, but confirm rather than guess).
+  cat("\nValue distributions for each candidate column:\n")
+  for (col in candidate_cols) {
+    cat("\n", col, ":\n")
+    print(table(Chik_total[[col]], useNA = "ifany"))
+  }
+}
+```
+
+## Point 4 continued: the "doubly disjoint" tabulation
+
+Of the 5 candidate columns, only three are clean enough to use: `DIABETES`,
+`RENAL`, `HIPERTENSA` -- all standard 1=Yes/2=No coding, ~85% complete.
+`DOENCA_TRA` (93.6% missing) and `IMUNOH_N` (99.98% missing, and coded
+2/3/4 rather than the expected 1/2/9) are excluded from the primary
+calculation as too sparse/uncertain to trust.
+
+```{r step1-point4-doubly-disjoint}
+chik_confirmed <- chik_confirmed %>%
+  mutate(
+    has_diabetes = case_when(DIABETES == "1" ~ TRUE, DIABETES == "2" ~ FALSE, TRUE ~ NA),
+    has_renal    = case_when(RENAL == "1" ~ TRUE, RENAL == "2" ~ FALSE, TRUE ~ NA),
+    has_hiperten = case_when(HIPERTENSA == "1" ~ TRUE, HIPERTENSA == "2" ~ FALSE, TRUE ~ NA),
+    n_comorbidity_recorded = rowSums(!is.na(cbind(has_diabetes, has_renal, has_hiperten))),
+    n_conditions_raw = rowSums(cbind(has_diabetes, has_renal, has_hiperten), na.rm = TRUE),
+    n_conditions = if_else(n_comorbidity_recorded == 0L, NA_integer_, as.integer(n_conditions_raw)),
+    any_condition = if_else(n_comorbidity_recorded == 0L, NA, n_conditions >= 1),
+    multi_condition = if_else(n_comorbidity_recorded == 0L, NA, n_conditions >= 2)
+  )
+
+cat("=== Among the 60+ (outside 18-59 window) band: comorbidity flags ===\n")
+comorbidity_60plus <- chik_confirmed %>%
+  filter(eligibility_band == "60+ (outside 18-59 window)")
+
+cat("Total confirmed cases, 60+ band:", nrow(comorbidity_60plus), "\n")
+cat("  Missing all three comorbidity fields:",
+    sum(is.na(comorbidity_60plus$DIABETES) & is.na(comorbidity_60plus$RENAL) & is.na(comorbidity_60plus$HIPERTENSA)), "\n")
+cat("  With at least one flagged condition:", sum(comorbidity_60plus$any_condition, na.rm = TRUE),
+    sprintf("(%.1f%% of those with data)",
+            100 * sum(comorbidity_60plus$any_condition, na.rm = TRUE) /
+              sum(!is.na(comorbidity_60plus$DIABETES) | !is.na(comorbidity_60plus$RENAL) | !is.na(comorbidity_60plus$HIPERTENSA))), "\n")
+cat("  With more than one recorded flagged condition:",
+    sum(comorbidity_60plus$multi_condition, na.rm = TRUE), "\n")
+
+cat("\n=== Deaths in the 60+ band: recorded comorbidity overlap ===\n")
+deaths_60plus_doubly_excluded <- chik_confirmed %>%
+  filter(eligibility_band == "60+ (outside 18-59 window)", case_status == "Death")
+
+cat("Deaths in 60+ band:", nrow(deaths_60plus_doubly_excluded), "\n")
+known_death_comorb <- sum(deaths_60plus_doubly_excluded$n_comorbidity_recorded > 0, na.rm = TRUE)
+cat("  Deaths with >=1 of the three comorbidity fields recorded:", known_death_comorb, "\n")
+cat("  Of those with comorbidity data, >=1 flagged chronic condition:",
+    sum(deaths_60plus_doubly_excluded$any_condition %in% TRUE, na.rm = TRUE),
+    sprintf("(%.1f%%)", ifelse(known_death_comorb > 0,
+      100 * sum(deaths_60plus_doubly_excluded$any_condition %in% TRUE, na.rm = TRUE) / known_death_comorb, NA_real_)), "\n")
+cat("  Of those with comorbidity data, >1 flagged chronic condition:",
+    sum(deaths_60plus_doubly_excluded$multi_condition %in% TRUE, na.rm = TRUE),
+    sprintf("(%.1f%%)", ifelse(known_death_comorb > 0,
+      100 * sum(deaths_60plus_doubly_excluded$multi_condition %in% TRUE, na.rm = TRUE) / known_death_comorb, NA_real_)), "\n")
+
+```
+
+## Downstream interpretation
+
+The outputs above quantify how observed cases, hospitalizations, and deaths are
+distributed across the age bands used by the revision framework. They are descriptive
+and should not be interpreted as estimates of vaccine-preventable events.
+
+Formal transmission-severity prioritization is handled downstream in
+`13_expected_burden_metric_FINAL_2016_2025.Rmd`, where transmission intensity and
+age-weighted severity vulnerability are defined explicitly and kept separate from this
+eligibility split.

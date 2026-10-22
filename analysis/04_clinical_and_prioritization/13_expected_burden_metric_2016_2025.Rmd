@@ -1,0 +1,1900 @@
+---
+title: "13 - Severity Vulnerability and Combined Transmission-Severity Burden"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+No new INLA severity model is fitted here.
+
+The revised framework retains the completed continuous transmission and severity quantities and
+adds the product-specific Step 11 metrics required for the two-product communication layer:
+
+1. `T_i`: recent transmission intensity, defined as mean posterior IRR in 2024-2025.
+2. `V_i`: age-weighted severity vulnerability, defined as the municipality age-composition-weighted national age-specific observed CFR.
+3. `B_i`: all-age combined transmission-severity burden score, defined as `T_i` multiplied by the population-weighted severity burden.
+4. `Metric_A`: deployable 18-59 burden score, `T_i * sum_{a=18-59}(P_ia * CFR_a)`.
+5. `Metric_B`: older-adult 60+ burden score, `T_i * sum_{a>=60}(P_ia * CFR_a)`.
+
+All burden scores are relative prioritization scores because `T_i` is a posterior relative incidence
+measure rather than a calibrated absolute incidence prediction. They must not be interpreted as
+predicted numbers of deaths.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+
+results_dir <- path.expand("~/Downloads/inla_results")
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# 1. Load completed inputs
+
+This step uses the already-completed population panels and INLA posterior rates. It does not refit the spatiotemporal model.
+
+```{r load-inputs}
+if (!exists("pop_panel_total")) {
+  if (!file.exists("pop_panel_total.rds")) stop("pop_panel_total.rds not found.")
+  pop_panel_total <- readRDS("pop_panel_total.rds")
+}
+
+if (!exists("pop_panel_age")) {
+  if (!file.exists("pop_panel_age.rds")) stop("pop_panel_age.rds not found.")
+  pop_panel_age <- readRDS("pop_panel_age.rds")
+}
+
+st_rate_path <- file.path(results_dir, "st_rate_chik_region_2016_2025.rds")
+
+if (!exists("st_rate_chik_region")) {
+  if (!file.exists(st_rate_path)) {
+    stop("st_rate_chik_region_2016_2025.rds not found in ~/Downloads/inla_results.")
+  }
+  st_rate_chik_region <- readRDS(st_rate_path)
+}
+
+if (!exists("Chik_total")) {
+  stop("Chik_total is not in memory. Run the revised 01_data_import_cleaning.Rmd first.")
+}
+
+if (!exists("decode_age_years")) {
+  decode_age_years <- function(NU_IDADE_N) {
+    unit_code <- floor(NU_IDADE_N / 1000)
+    value <- NU_IDADE_N %% 1000
+    dplyr::case_when(
+      unit_code == 1 ~ value / (24 * 365),
+      unit_code == 2 ~ value / 365,
+      unit_code == 3 ~ value / 12,
+      unit_code == 4 ~ value,
+      TRUE ~ NA_real_
+    )
+  }
+}
+
+stopifnot(
+  n_distinct(st_rate_chik_region$code_muni) == 5570L,
+  n_distinct(pop_panel_total$code_muni) == 5570L,
+  n_distinct(pop_panel_age$code_muni) == 5570L
+)
+
+cat("INLA rate rows:", nrow(st_rate_chik_region), "\n")
+cat("INLA municipalities:", n_distinct(st_rate_chik_region$code_muni), "\n")
+cat("Population municipalities:", n_distinct(pop_panel_age$code_muni), "\n")
+```
+
+# 2. National age-specific observed CFR, 2016-2025
+
+The main severity weights use the full study period. Six age bands are used so that the strong increase in observed fatality with older age is not collapsed into a single 65+ category.
+
+```{r cfr-weights}
+chik_severity <- Chik_total %>%
+  mutate(
+    year = lubridate::year(as.Date(DT_SIN_PRI)),
+    age_years = decode_age_years(NU_IDADE_N),
+    age_band = case_when(
+      !is.na(age_years) & age_years < 18 ~ "0-17",
+      age_years >= 18 & age_years < 40 ~ "18-39",
+      age_years >= 40 & age_years < 60 ~ "40-59",
+      age_years >= 60 & age_years < 70 ~ "60-69",
+      age_years >= 70 & age_years < 80 ~ "70-79",
+      age_years >= 80 ~ "80+",
+      TRUE ~ NA_character_
+    ),
+    death = as.integer(as.character(EVOLUCAO) == "2")
+  ) %>%
+  filter(
+    year %in% 2016:2025,
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(age_band)
+  )
+
+cfr_weights <- chik_severity %>%
+  group_by(age_band) %>%
+  summarise(
+    cases = n(),
+    deaths = sum(death, na.rm = TRUE),
+    CFR = deaths / cases,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    age_band = factor(
+      age_band,
+      levels = c("0-17", "18-39", "40-59", "60-69", "70-79", "80+")
+    )
+  ) %>%
+  arrange(age_band)
+
+print(cfr_weights)
+```
+
+# 3. Recent transmission intensity, 2024-2025
+
+`T_i` is the municipality mean of the monthly posterior IRR during 2024-2025, matching the recent targeting window used by the priority framework.
+
+```{r transmission-2024-2025}
+transmission_source_2425 <- st_rate_chik_region %>%
+  mutate(ym_date = as.Date(ym_date)) %>%
+  filter(lubridate::year(ym_date) %in% c(2024, 2025))
+
+transmission_check <- transmission_source_2425 %>%
+  count(code_muni, name = "n_months")
+
+stopifnot(
+  nrow(transmission_check) == 5570L,
+  all(transmission_check$n_months == 24L)
+)
+
+transmission_2425 <- transmission_source_2425 %>%
+  group_by(code_muni) %>%
+  summarise(
+    T_irr = mean(IRR),
+    .groups = "drop"
+  )
+
+stopifnot(
+  nrow(transmission_2425) == 5570L,
+  n_distinct(transmission_2425$code_muni) == 5570L,
+  !anyDuplicated(transmission_2425$code_muni),
+  all(is.finite(transmission_2425$T_irr))
+)
+
+summary(transmission_2425$T_irr)
+```
+
+# 4. Municipality age composition, 2024-2025
+
+Population is averaged across 2024 and 2025 within each age band before calculating the municipality age composition.
+
+```{r population-age-2024-2025}
+pop_age_2425 <- pop_panel_age %>%
+  filter(year %in% c(2024, 2025)) %>%
+  mutate(
+    age_band = case_when(
+      age < 18 ~ "0-17",
+      age >= 18 & age < 40 ~ "18-39",
+      age >= 40 & age < 60 ~ "40-59",
+      age >= 60 & age < 70 ~ "60-69",
+      age >= 70 & age < 80 ~ "70-79",
+      age >= 80 ~ "80+",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(age_band)) %>%
+  group_by(code_muni, year, age_band) %>%
+  summarise(
+    pop = sum(pop, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(code_muni, age_band) %>%
+  summarise(
+    mean_pop = mean(pop),
+    .groups = "drop"
+  )
+
+coverage_check <- pop_age_2425 %>%
+  count(code_muni, name = "n_age_bands")
+
+stopifnot(
+  n_distinct(pop_age_2425$code_muni) == 5570L,
+  all(coverage_check$n_age_bands == 6L)
+)
+```
+
+# 5. Severity vulnerability and population-weighted severity burden
+
+For municipality `i` and age group `a`,
+
+`w_ia = P_ia / P_i`
+
+and the age-weighted severity vulnerability score is
+
+`V_i = sum_a(w_ia * CFR_a)`.
+
+The population-weighted severity burden component is
+
+`S_i = sum_a(P_ia * CFR_a)`.
+
+`V_i` removes municipality population size from the severity axis. `S_i` intentionally retains population size and is used only in the combined burden score.
+
+```{r severity-metrics}
+severity_muni <- pop_age_2425 %>%
+  left_join(
+    cfr_weights %>% select(age_band, CFR),
+    by = "age_band"
+  ) %>%
+  group_by(code_muni) %>%
+  mutate(
+    total_pop = sum(mean_pop),
+    w_age = mean_pop / total_pop
+  ) %>%
+  summarise(
+    total_pop = first(total_pop),
+    V_risk = sum(w_age * CFR),
+    V_burden = sum(mean_pop * CFR),
+    .groups = "drop"
+  )
+
+stopifnot(
+  nrow(severity_muni) == 5570L,
+  sum(is.na(severity_muni$V_risk)) == 0L,
+  sum(is.na(severity_muni$V_burden)) == 0L
+)
+
+cat("Spearman V_burden vs population:",
+    cor(severity_muni$V_burden, severity_muni$total_pop,
+        method = "spearman"), "\n")
+cat("Spearman V_risk vs population:",
+    cor(severity_muni$V_risk, severity_muni$total_pop,
+        method = "spearman"), "\n")
+
+summary(severity_muni$V_risk)
+summary(severity_muni$V_burden)
+```
+
+# 6. Combined transmission-severity burden score
+
+The combined score is
+
+`B_i = T_i * S_i`.
+
+Because `T_i` is a relative posterior IRR rather than an absolute predicted incidence, `B_i` is an uncalibrated prioritization score and must not be interpreted as a predicted number of deaths.
+
+```{r combined-score}
+priority_metric_2425 <- transmission_2425 %>%
+  left_join(severity_muni, by = "code_muni") %>%
+  mutate(
+    combined_burden = T_irr * V_burden,
+    code_state = substr(code_muni, 1, 2)
+  ) %>%
+  left_join(state_region_lookup, by = "code_state")
+
+stopifnot(
+  nrow(priority_metric_2425) == 5570L,
+  n_distinct(priority_metric_2425$code_muni) == 5570L,
+  !anyDuplicated(priority_metric_2425$code_muni),
+  all(is.finite(priority_metric_2425$T_irr)),
+  all(is.finite(priority_metric_2425$V_risk)),
+  all(is.finite(priority_metric_2425$V_burden)),
+  all(is.finite(priority_metric_2425$combined_burden)),
+  isTRUE(all.equal(
+    priority_metric_2425$combined_burden,
+    priority_metric_2425$T_irr * priority_metric_2425$V_burden
+  ))
+)
+
+summary(priority_metric_2425$combined_burden)
+```
+
+
+# 6A. Product-specific expected-burden metrics
+
+Ana's Step 11 distinguishes the population currently eligible for the licensed product
+(ages 18-59) from adults aged 60 years and older, who are excluded from that product but
+are the target population for the second-product policy scenario.
+
+For each municipality, the age-specific population-weighted severity components are
+
+`S_Ai = sum_{a in 18-59}(P_ia * CFR_a)`
+
+and
+
+`S_Bi = sum_{a >= 60}(P_ia * CFR_a)`.
+
+The two continuous prioritization scores are
+
+`Metric_Ai = T_i * S_Ai`
+
+and
+
+`Metric_Bi = T_i * S_Bi`.
+
+These are relative expected-burden scores, not calibrated expected death counts.
+
+```{r product-specific-metrics}
+product_burden_components <- pop_age_2425 %>%
+  left_join(
+    cfr_weights %>%
+      select(
+        age_band,
+        CFR
+      ),
+    by = "age_band"
+  ) %>%
+  mutate(
+    product_group = case_when(
+      age_band %in%
+        c("18-39", "40-59") ~
+        "A_18_59",
+      age_band %in%
+        c("60-69", "70-79", "80+") ~
+        "B_60plus",
+      TRUE ~ "Other"
+    ),
+    weighted_severity =
+      mean_pop * CFR
+  ) %>%
+  filter(
+    product_group %in%
+      c("A_18_59", "B_60plus")
+  ) %>%
+  group_by(
+    code_muni,
+    product_group
+  ) %>%
+  summarise(
+    severity_burden_component =
+      sum(
+        weighted_severity,
+        na.rm = TRUE
+      ),
+    product_population =
+      sum(
+        mean_pop,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = product_group,
+    values_from = c(
+      severity_burden_component,
+      product_population
+    )
+  ) %>%
+  rename(
+    S_A_18_59 =
+      severity_burden_component_A_18_59,
+    S_B_60plus =
+      severity_burden_component_B_60plus,
+    pop_A_18_59 =
+      product_population_A_18_59,
+    pop_B_60plus =
+      product_population_B_60plus
+  )
+
+stopifnot(
+  nrow(product_burden_components) == 5570L,
+  all(
+    is.finite(
+      product_burden_components$
+        S_A_18_59
+    )
+  ),
+  all(
+    is.finite(
+      product_burden_components$
+        S_B_60plus
+    )
+  ),
+  all(
+    product_burden_components$
+      S_A_18_59 >= 0
+  ),
+  all(
+    product_burden_components$
+      S_B_60plus >= 0
+  )
+)
+
+priority_metric_2425 <-
+  priority_metric_2425 %>%
+  left_join(
+    product_burden_components,
+    by = "code_muni"
+  ) %>%
+  mutate(
+    Metric_A =
+      T_irr * S_A_18_59,
+    Metric_B =
+      T_irr * S_B_60plus
+  )
+
+stopifnot(
+  !anyNA(priority_metric_2425$Metric_A),
+  !anyNA(priority_metric_2425$Metric_B),
+  all(
+    is.finite(
+      priority_metric_2425$Metric_A
+    )
+  ),
+  all(
+    is.finite(
+      priority_metric_2425$Metric_B
+    )
+  )
+)
+
+cat(
+  "Spearman Metric A vs transmission-only:",
+  cor(
+    priority_metric_2425$Metric_A,
+    priority_metric_2425$T_irr,
+    method = "spearman"
+  ),
+  "\n"
+)
+
+cat(
+  "Spearman Metric B vs transmission-only:",
+  cor(
+    priority_metric_2425$Metric_B,
+    priority_metric_2425$T_irr,
+    method = "spearman"
+  ),
+  "\n"
+)
+
+cat(
+  "Spearman Metric A vs Metric B:",
+  cor(
+    priority_metric_2425$Metric_A,
+    priority_metric_2425$Metric_B,
+    method = "spearman"
+  ),
+  "\n"
+)
+```
+
+# 6B. Continuous-ranking concordance and difference
+
+Raw Metric A and Metric B values are not directly comparable because their age windows and
+severity scales differ. For the map of disagreement, compare percentile ranks rather than raw
+scores.
+
+```{r product-rank-concordance}
+priority_metric_2425 <-
+  priority_metric_2425 %>%
+  mutate(
+    rank_A =
+      rank(
+        -Metric_A,
+        ties.method = "average"
+      ),
+    rank_B =
+      rank(
+        -Metric_B,
+        ties.method = "average"
+      ),
+    pct_A =
+      1 -
+      (
+        rank_A - 1
+      ) /
+      (
+        n() - 1
+      ),
+    pct_B =
+      1 -
+      (
+        rank_B - 1
+      ) /
+      (
+        n() - 1
+      ),
+    rank_percentile_difference =
+      pct_A - pct_B
+  )
+
+rank_concordance_two_product <-
+  tibble::tibble(
+    comparison = c(
+      "Metric A vs Metric B",
+      "Metric A vs transmission-only",
+      "Metric B vs transmission-only"
+    ),
+    spearman_rho = c(
+      cor(
+        priority_metric_2425$Metric_A,
+        priority_metric_2425$Metric_B,
+        method = "spearman"
+      ),
+      cor(
+        priority_metric_2425$Metric_A,
+        priority_metric_2425$T_irr,
+        method = "spearman"
+      ),
+      cor(
+        priority_metric_2425$Metric_B,
+        priority_metric_2425$T_irr,
+        method = "spearman"
+      )
+    )
+  )
+
+print(rank_concordance_two_product)
+```
+
+# 6C. Two-product communication zones
+
+The zone layer is derived from the two continuous Step 11 product-specific metrics, not from
+the old raw transmission and severity axes.
+
+The rule is deliberately simple and stated exactly:
+
+- **Transmission-control**: upper tertile of Metric A only.
+- **Clinical-preparedness**: upper tertile of Metric B only.
+- **Combined priority**: upper tertile of both Metric A and Metric B.
+- **Neither upper tertile**: neither product-specific score is in its upper tertile.
+
+The threshold is a communication layer only; all inferential and head-to-head analyses retain
+the continuous rankings.
+
+```{r two-product-zones}
+cut_A <- quantile(
+  priority_metric_2425$Metric_A,
+  probs = 2 / 3,
+  na.rm = TRUE
+)
+
+cut_B_product <- quantile(
+  priority_metric_2425$Metric_B,
+  probs = 2 / 3,
+  na.rm = TRUE
+)
+
+priority_metric_2425 <-
+  priority_metric_2425 %>%
+  mutate(
+    high_Metric_A =
+      Metric_A >= cut_A,
+    high_Metric_B =
+      Metric_B >= cut_B_product,
+    two_product_zone =
+      case_when(
+        high_Metric_A &
+          high_Metric_B ~
+          "Combined priority",
+        high_Metric_A &
+          !high_Metric_B ~
+          "Transmission-control",
+        !high_Metric_A &
+          high_Metric_B ~
+          "Clinical-preparedness",
+        TRUE ~
+          "Neither upper tertile"
+      )
+  )
+
+two_product_zone_counts <-
+  priority_metric_2425 %>%
+  count(
+    two_product_zone,
+    name = "n_municipalities"
+  ) %>%
+  mutate(
+    percent_municipalities =
+      100 *
+      n_municipalities /
+      sum(n_municipalities)
+  ) %>%
+  arrange(
+    desc(n_municipalities)
+  )
+
+print(two_product_zone_counts)
+
+cat(
+  "Metric A upper-tertile cutoff:",
+  cut_A,
+  "\n"
+)
+
+cat(
+  "Metric B upper-tertile cutoff:",
+  cut_B_product,
+  "\n"
+)
+```
+
+# 6D. Concordance of zones with the continuous rankings
+
+This table demonstrates that the categorical zones are only a readable summary of the
+underlying continuous product-specific scores.
+
+```{r zone-continuous-concordance}
+zone_continuous_concordance <-
+  priority_metric_2425 %>%
+  group_by(
+    two_product_zone
+  ) %>%
+  summarise(
+    n_municipalities = n(),
+    median_Metric_A =
+      median(
+        Metric_A,
+        na.rm = TRUE
+      ),
+    median_Metric_B =
+      median(
+        Metric_B,
+        na.rm = TRUE
+      ),
+    median_pct_A =
+      median(
+        pct_A,
+        na.rm = TRUE
+      ),
+    median_pct_B =
+      median(
+        pct_B,
+        na.rm = TRUE
+      ),
+    median_rank_difference =
+      median(
+        rank_percentile_difference,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  ) %>%
+  arrange(
+    desc(median_pct_A)
+  )
+
+print(zone_continuous_concordance)
+
+top_A_codes <-
+  priority_metric_2425 %>%
+  filter(high_Metric_A) %>%
+  pull(code_muni)
+
+top_B_codes <-
+  priority_metric_2425 %>%
+  filter(high_Metric_B) %>%
+  pull(code_muni)
+
+two_product_overlap <-
+  tibble::tibble(
+    n_top_A =
+      length(top_A_codes),
+    n_top_B =
+      length(top_B_codes),
+    n_overlap =
+      length(
+        intersect(
+          top_A_codes,
+          top_B_codes
+        )
+      ),
+    overlap_share_of_A =
+      n_overlap / n_top_A,
+    overlap_share_of_B =
+      n_overlap / n_top_B,
+    jaccard =
+      n_overlap /
+      length(
+        union(
+          top_A_codes,
+          top_B_codes
+        )
+      )
+  )
+
+print(two_product_overlap)
+```
+
+# 6E. Two-product maps
+
+The first two panels show percentile ranks of the two continuous metrics. The third panel shows
+where the rankings diverge. Positive values indicate relatively higher priority under the current
+18-59 product metric; negative values indicate relatively higher priority under the 60+ metric.
+The fourth panel is the categorical communication layer.
+
+```{r two-product-maps, fig.width=10, fig.height=8}
+muni_sf_path <- "muni_sf_2020.rds"
+
+if (!exists("muni_sf")) {
+  if (file.exists(muni_sf_path)) {
+    muni_sf <- readRDS(muni_sf_path)
+  }
+}
+
+if (exists("muni_sf")) {
+
+  map_key <- names(muni_sf)[
+    grepl(
+      "code_muni",
+      names(muni_sf),
+      ignore.case = TRUE
+    )
+  ][1]
+
+  if (is.na(map_key) || length(map_key) == 0L) {
+    stop(
+      "Could not identify code_muni column in muni_sf."
+    )
+  }
+
+  muni_map <- muni_sf %>%
+    mutate(
+      code_muni =
+        stringr::str_pad(
+          substr(
+            as.character(
+              .data[[map_key]]
+            ),
+            1,
+            6
+          ),
+          width = 6,
+          side = "left",
+          pad = "0"
+        )
+    ) %>%
+    left_join(
+      priority_metric_2425 %>%
+        select(
+          code_muni,
+          pct_A,
+          pct_B,
+          rank_percentile_difference,
+          two_product_zone
+        ),
+      by = "code_muni"
+    )
+
+  stopifnot(
+    sum(
+      is.na(
+        muni_map$pct_A
+      )
+    ) == 0L
+  )
+
+  p_metric_A <- ggplot(
+    muni_map
+  ) +
+    geom_sf(
+      aes(
+        fill = pct_A
+      ),
+      color = NA
+    ) +
+    scale_fill_viridis_c(
+      labels =
+        scales::percent_format(
+          accuracy = 1
+        ),
+      name =
+        "Priority\npercentile"
+    ) +
+    labs(
+      title =
+        "Metric A: ages 18-59",
+      subtitle =
+        "Current-product expected-burden ranking"
+    ) +
+    theme_void()
+
+  p_metric_B <- ggplot(
+    muni_map
+  ) +
+    geom_sf(
+      aes(
+        fill = pct_B
+      ),
+      color = NA
+    ) +
+    scale_fill_viridis_c(
+      labels =
+        scales::percent_format(
+          accuracy = 1
+        ),
+      name =
+        "Priority\npercentile"
+    ) +
+    labs(
+      title =
+        "Metric B: ages 60+",
+      subtitle =
+        "Older-adult expected-burden ranking"
+    ) +
+    theme_void()
+
+  p_metric_difference <- ggplot(
+    muni_map
+  ) +
+    geom_sf(
+      aes(
+        fill =
+          rank_percentile_difference
+      ),
+      color = NA
+    ) +
+    scale_fill_gradient2(
+      midpoint = 0,
+      labels =
+        scales::percent_format(
+          accuracy = 1
+        ),
+      name =
+        "A minus B\npercentile"
+    ) +
+    labs(
+      title =
+        "Difference in product-specific priority",
+      subtitle =
+        "Positive = relatively higher under Metric A; negative = relatively higher under Metric B"
+    ) +
+    theme_void()
+
+  p_two_product_zone <- ggplot(
+    muni_map
+  ) +
+    geom_sf(
+      aes(
+        fill =
+          two_product_zone
+      ),
+      color = NA
+    ) +
+    labs(
+      title =
+        "Two-product communication zones",
+      fill = NULL
+    ) +
+    theme_void() +
+    theme(
+      legend.position = "bottom"
+    )
+
+  if (
+    requireNamespace(
+      "patchwork",
+      quietly = TRUE
+    )
+  ) {
+    fig_two_product <-
+      (
+        p_metric_A |
+          p_metric_B
+      ) /
+      (
+        p_metric_difference |
+          p_two_product_zone
+      )
+
+    print(fig_two_product)
+
+    ggsave(
+      file.path(
+        results_dir,
+        "two_product_priority_maps_2024_2025.png"
+      ),
+      fig_two_product,
+      width = 10,
+      height = 8,
+      dpi = 600,
+      bg = "white"
+    )
+
+    ggsave(
+      file.path(
+        results_dir,
+        "two_product_priority_maps_2024_2025.pdf"
+      ),
+      fig_two_product,
+      width = 10,
+      height = 8
+    )
+  } else {
+    print(p_metric_A)
+    print(p_metric_B)
+    print(p_metric_difference)
+    print(p_two_product_zone)
+  }
+
+} else {
+  message(
+    "muni_sf_2020.rds not found; tables were created, but map generation was skipped."
+  )
+}
+```
+
+# 6F. Save two-product Step 13 outputs
+
+```{r save-two-product-outputs}
+readr::write_csv(
+  priority_metric_2425 %>%
+    select(
+      code_muni,
+      region,
+      T_irr,
+      S_A_18_59,
+      S_B_60plus,
+      pop_A_18_59,
+      pop_B_60plus,
+      Metric_A,
+      Metric_B,
+      rank_A,
+      rank_B,
+      pct_A,
+      pct_B,
+      rank_percentile_difference,
+      high_Metric_A,
+      high_Metric_B,
+      two_product_zone
+    ),
+  file.path(
+    results_dir,
+    "two_product_priority_metric_2024_2025.csv"
+  )
+)
+
+readr::write_csv(
+  two_product_zone_counts,
+  file.path(
+    results_dir,
+    "two_product_zone_counts_2024_2025.csv"
+  )
+)
+
+readr::write_csv(
+  zone_continuous_concordance,
+  file.path(
+    results_dir,
+    "two_product_zone_continuous_concordance_2024_2025.csv"
+  )
+)
+
+readr::write_csv(
+  two_product_overlap,
+  file.path(
+    results_dir,
+    "two_product_top_tertile_overlap_2024_2025.csv"
+  )
+)
+
+readr::write_csv(
+  rank_concordance_two_product,
+  file.path(
+    results_dir,
+    "two_product_rank_correlations_2024_2025.csv"
+  )
+)
+
+cat(
+  "\nTwo-product Step 13 outputs saved to:",
+  results_dir,
+  "\n"
+)
+```
+
+
+# 7. Legacy all-age tertile layer retained for backward compatibility
+
+This older all-age transmission/vulnerability classification is retained only so existing downstream validation and archived outputs continue to run. It is **not** the final Step 13 two-product zone definition. The final product-specific communication layer is Section 6C above.
+
+Tertiles are retained only as a communication/classification layer. The underlying transmission, vulnerability, and combined burden scores remain continuous.
+
+```{r tertile-framework}
+cut_T <- quantile(priority_metric_2425$T_irr, 2 / 3, na.rm = TRUE)
+cut_V <- quantile(priority_metric_2425$V_risk, 2 / 3, na.rm = TRUE)
+cut_B <- quantile(priority_metric_2425$combined_burden, 2 / 3, na.rm = TRUE)
+
+priority_metric_2425 <- priority_metric_2425 %>%
+  mutate(
+    high_transmission = T_irr >= cut_T,
+    high_vulnerability = V_risk >= cut_V,
+    high_combined_burden = combined_burden >= cut_B,
+    priority_zone = case_when(
+      high_transmission & high_vulnerability ~ "High transmission + high severity vulnerability",
+      high_transmission & !high_vulnerability ~ "High transmission",
+      !high_transmission & high_vulnerability ~ "High severity vulnerability",
+      TRUE ~ "Neither upper tertile"
+    )
+  )
+
+cat("Transmission upper-tertile cutoff:", cut_T, "\n")
+cat("Severity-vulnerability upper-tertile cutoff:", cut_V, "\n")
+cat("Combined-burden upper-tertile cutoff:", cut_B, "\n\n")
+
+print(priority_metric_2425 %>% count(priority_zone, sort = TRUE))
+```
+
+# 8. Validation against exact percentage aged 65+
+
+This analysis tests whether the CFR-weighted severity score adds information beyond the original simple age-structure axis.
+
+```{r validation-age65}
+age65_exact <- pop_panel_age %>%
+  filter(year %in% c(2024, 2025)) %>%
+  group_by(code_muni, year) %>%
+  summarise(
+    total_pop = sum(pop, na.rm = TRUE),
+    pop_65plus = sum(pop[age >= 65], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(code_muni) %>%
+  summarise(
+    mean_total_pop = mean(total_pop),
+    mean_pop_65plus = mean(pop_65plus),
+    prop_65plus = mean_pop_65plus / mean_total_pop,
+    .groups = "drop"
+  )
+
+validation_age65 <- priority_metric_2425 %>%
+  select(code_muni, V_risk) %>%
+  left_join(age65_exact %>% select(code_muni, prop_65plus), by = "code_muni")
+
+rho_age65 <- cor(
+  validation_age65$V_risk,
+  validation_age65$prop_65plus,
+  method = "spearman"
+)
+
+cut_v_validation <- quantile(validation_age65$V_risk, 2 / 3, na.rm = TRUE)
+cut_age65 <- quantile(validation_age65$prop_65plus, 2 / 3, na.rm = TRUE)
+
+validation_age65 <- validation_age65 %>%
+  mutate(
+    high_V = V_risk >= cut_v_validation,
+    high_age65 = prop_65plus >= cut_age65
+  )
+
+n_v <- sum(validation_age65$high_V)
+n_age65 <- sum(validation_age65$high_age65)
+n_overlap_age65 <- sum(validation_age65$high_V & validation_age65$high_age65)
+overlap_age65 <- n_overlap_age65 / n_v
+
+cat("Spearman V_risk vs exact %65+:", round(rho_age65, 4), "\n")
+cat("V_risk upper tertile:", n_v, "\n")
+cat("%65+ upper tertile:", n_age65, "\n")
+cat("Overlap:", n_overlap_age65, "\n")
+cat("Upper-tertile overlap (%):", round(100 * overlap_age65, 1), "\n")
+```
+
+Expected from the current revised data: Spearman rho approximately 0.9673 and upper-tertile overlap approximately 88.0%.
+
+# 9. Sensitivity: exclude 2020-2021 from CFR weights
+
+The primary severity weights use the complete 2016-2025 study period. This sensitivity excludes the COVID-19 pandemic years from the CFR estimation while leaving the 2024-2025 population composition unchanged.
+
+```{r sensitivity-exclude-2020-2021}
+cfr_weights_sens <- chik_severity %>%
+  group_by(age_band) %>%
+  summarise(
+    cases_all = n(),
+    deaths_all = sum(death, na.rm = TRUE),
+    CFR_all = deaths_all / cases_all,
+    cases_nonCOVID = sum(!year %in% c(2020, 2021)),
+    deaths_nonCOVID = sum(death[!year %in% c(2020, 2021)], na.rm = TRUE),
+    CFR_nonCOVID = deaths_nonCOVID / cases_nonCOVID,
+    .groups = "drop"
+  )
+
+V_sensitivity <- pop_age_2425 %>%
+  left_join(cfr_weights_sens, by = "age_band") %>%
+  group_by(code_muni) %>%
+  mutate(total_pop = sum(mean_pop)) %>%
+  summarise(
+    V_all = sum((mean_pop / total_pop) * CFR_all),
+    V_nonCOVID = sum((mean_pop / total_pop) * CFR_nonCOVID),
+    .groups = "drop"
+  )
+
+rho_covid_sens <- cor(
+  V_sensitivity$V_all,
+  V_sensitivity$V_nonCOVID,
+  method = "spearman"
+)
+
+cut_all <- quantile(V_sensitivity$V_all, 2 / 3, na.rm = TRUE)
+cut_nonCOVID <- quantile(V_sensitivity$V_nonCOVID, 2 / 3, na.rm = TRUE)
+
+V_sensitivity <- V_sensitivity %>%
+  mutate(
+    high_all = V_all >= cut_all,
+    high_nonCOVID = V_nonCOVID >= cut_nonCOVID
+  )
+
+n_all <- sum(V_sensitivity$high_all)
+n_nonCOVID <- sum(V_sensitivity$high_nonCOVID)
+n_overlap_covid <- sum(V_sensitivity$high_all & V_sensitivity$high_nonCOVID)
+overlap_covid <- n_overlap_covid / n_all
+
+print(cfr_weights_sens)
+cat("Spearman V_all vs V_nonCOVID:", round(rho_covid_sens, 4), "\n")
+cat("All-years upper tertile:", n_all, "\n")
+cat("Non-COVID upper tertile:", n_nonCOVID, "\n")
+cat("Overlap:", n_overlap_covid, "\n")
+cat("Upper-tertile overlap (%):", round(100 * overlap_covid, 1), "\n")
+```
+
+Expected from the current revised data: Spearman rho approximately 1.000 and upper-tertile overlap approximately 99.9%.
+
+# 10. Region summary
+
+```{r region-summary}
+region_summary <- priority_metric_2425 %>%
+  group_by(region) %>%
+  summarise(
+    n_municipalities = n(),
+    median_T = median(T_irr, na.rm = TRUE),
+    median_V = median(V_risk, na.rm = TRUE),
+    median_combined_burden = median(combined_burden, na.rm = TRUE),
+    n_high_T = sum(high_transmission),
+    n_high_V = sum(high_vulnerability),
+    n_high_both = sum(high_transmission & high_vulnerability),
+    n_high_combined = sum(high_combined_burden),
+    .groups = "drop"
+  )
+
+print(region_summary)
+```
+
+# 11. Save final outputs
+
+```{r save-outputs}
+write_csv(
+  cfr_weights %>% mutate(age_band = as.character(age_band)),
+  file.path(results_dir, "age_specific_CFR_2016_2025.csv")
+)
+
+write_csv(
+  priority_metric_2425,
+  file.path(results_dir, "priority_transmission_severity_2024_2025.csv")
+)
+
+saveRDS(
+  priority_metric_2425,
+  file.path(results_dir, "priority_transmission_severity_2024_2025.rds")
+)
+
+write_csv(
+  priority_metric_2425 %>%
+    select(
+      code_muni,
+      region,
+      T_irr,
+      Metric_A,
+      Metric_B,
+      pct_A,
+      pct_B,
+      rank_percentile_difference,
+      two_product_zone
+    ),
+  file.path(results_dir, "priority_two_product_2024_2025.csv")
+)
+
+write_csv(
+  validation_age65,
+  file.path(results_dir, "severity_validation_vs_age65_2024_2025.csv")
+)
+
+write_csv(
+  V_sensitivity,
+  file.path(results_dir, "severity_sensitivity_excl2020_2021.csv")
+)
+
+write_csv(
+  region_summary,
+  file.path(results_dir, "priority_transmission_severity_region_summary_2024_2025.csv")
+)
+
+cat("Saved final Step 13 outputs to:", results_dir, "\n")
+```
+
+# Interpretation guardrails
+
+- `V_risk` is an age-weighted ecological severity vulnerability score based on observed national age-specific CFRs; it is not an individual-level fatality probability.
+- `V_burden` intentionally incorporates municipality population size and therefore should not be used as the severity-vulnerability axis.
+- `combined_burden = T_irr * V_burden` is a relative prioritization score, not a calibrated prediction of deaths.
+- The 2020-2021 exclusion is a sensitivity analysis; temporal CFR differences should not be attributed causally to COVID-19 without additional evidence.
+- Tertiles are a communication layer derived from continuous metrics, not natural biological thresholds.
+- The final Step 13 zones use upper tertiles of `Metric_A` and `Metric_B`, not upper tertiles of the raw transmission and severity axes.
+- `Metric_A` is restricted to ages 18-59 and is the current-product allocation score.
+- `Metric_B` is restricted to ages 60+ and is a projection for an older-adult-eligible product; do not present it as prospectively validated.
+- The Metric A versus Metric B difference map is based on percentile-rank differences because raw score magnitudes are not commensurate across the two age windows.
+
+# 12. Head-to-head prioritization-rule comparison
+
+This section compares three deterministic municipality rankings at identical geographic coverage:
+
+1. transmission-only: `T_irr`;
+2. age/severity-only: `V_burden`;
+3. expected-burden: `combined_burden = T_irr * V_burden`.
+
+A random municipality ordering is included as a reference. The comparison uses observed 2024-2025 confirmed cases and deaths. These are retrospective capture statistics, not estimates of outcomes averted.
+
+Because the revised analytic universe contains 5,570 municipalities, an exact one-third threshold is not an integer. We therefore use `ceiling(5570 / 3) = 1857` municipalities for every deterministic rule.
+
+```{r head-to-head-observed-outcomes}
+# ------------------------------------------------------------------
+# Observed municipality outcomes, 2024-2025
+# ------------------------------------------------------------------
+obs_2425 <- Chik_total %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(DT_SIN_PRI)
+  ) %>%
+  mutate(
+    year = lubridate::year(as.Date(DT_SIN_PRI)),
+    code_muni = stringr::str_pad(
+      substr(as.character(ID_MUNICIP), 1, 6),
+      width = 6, side = "left", pad = "0"
+    ),
+    age_years_eval = decode_age_years(NU_IDADE_N),
+    death_eval = as.integer(as.character(EVOLUCAO) == "2"),
+    death_65plus_eval = as.integer(
+      as.character(EVOLUCAO) == "2" &
+        !is.na(age_years_eval) & age_years_eval >= 65
+    )
+  ) %>%
+  filter(year %in% 2024:2025) %>%
+  group_by(code_muni) %>%
+  summarise(
+    cases_2425 = n(),
+    deaths_2425 = sum(death_eval, na.rm = TRUE),
+    deaths_65plus_2425 = sum(death_65plus_eval, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Mean population aged 65+ in 2024-2025.
+pop65_2425 <- pop_panel_age %>%
+  filter(year %in% 2024:2025) %>%
+  group_by(code_muni, year) %>%
+  summarise(
+    pop_65plus = sum(pop[age >= 65], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(code_muni) %>%
+  summarise(
+    mean_pop_65plus_2425 = mean(pop_65plus),
+    .groups = "drop"
+  )
+
+rule_eval_2425 <- priority_metric_2425 %>%
+  select(
+    code_muni,
+    T_irr,
+    V_risk,
+    V_burden,
+    combined_burden
+  ) %>%
+  left_join(obs_2425, by = "code_muni") %>%
+  left_join(pop65_2425, by = "code_muni") %>%
+  mutate(
+    cases_2425 = tidyr::replace_na(cases_2425, 0L),
+    deaths_2425 = tidyr::replace_na(deaths_2425, 0L),
+    deaths_65plus_2425 = tidyr::replace_na(deaths_65plus_2425, 0L)
+  )
+
+stopifnot(
+  nrow(rule_eval_2425) == 5570L,
+  n_distinct(rule_eval_2425$code_muni) == 5570L,
+  sum(is.na(rule_eval_2425$mean_pop_65plus_2425)) == 0L,
+  sum(rule_eval_2425$cases_2425) == nrow(
+    Chik_total %>%
+      filter(
+        CLASSI_FIN %in% c(1, 13),
+        !is.na(DT_SIN_PRI),
+        lubridate::year(as.Date(DT_SIN_PRI)) %in% 2024:2025
+      )
+  )
+)
+
+cat("2024-2025 observed cases:", sum(rule_eval_2425$cases_2425), "\n")
+cat("2024-2025 observed deaths:", sum(rule_eval_2425$deaths_2425), "\n")
+cat("2024-2025 observed deaths age 65+:",
+    sum(rule_eval_2425$deaths_65plus_2425), "\n")
+```
+
+## 12.1 Matched-coverage top-third comparison
+
+```{r head-to-head-top-third}
+N_MUNI <- nrow(rule_eval_2425)
+N_SELECT <- ceiling(N_MUNI / 3)
+
+cat("Municipalities in comparison:", N_MUNI, "\n")
+cat("Matched top-third selection size:", N_SELECT, "\n")
+cat("Coverage (% municipalities):", round(100 * N_SELECT / N_MUNI, 2), "\n")
+
+rule_specs <- tibble::tribble(
+  ~rule, ~score_col,
+  "Transmission only", "T_irr",
+  "Age-structured severity burden", "V_burden",
+  "Expected burden", "combined_burden"
+)
+
+summarise_top_n <- function(dat, score_col, rule_name, n_select) {
+  selected <- dat %>%
+    arrange(desc(.data[[score_col]]), code_muni) %>%
+    slice_head(n = n_select)
+
+  tibble(
+    rule = rule_name,
+    n_selected = nrow(selected),
+    municipality_coverage = nrow(selected) / nrow(dat),
+    cases_captured = sum(selected$cases_2425),
+    cases_share = sum(selected$cases_2425) / sum(dat$cases_2425),
+    deaths_captured = sum(selected$deaths_2425),
+    deaths_share = ifelse(
+      sum(dat$deaths_2425) > 0,
+      sum(selected$deaths_2425) / sum(dat$deaths_2425),
+      NA_real_
+    ),
+    pop_65plus_covered = sum(selected$mean_pop_65plus_2425),
+    pop_65plus_share = sum(selected$mean_pop_65plus_2425) /
+      sum(dat$mean_pop_65plus_2425),
+    deaths_65plus_captured = sum(selected$deaths_65plus_2425),
+    deaths_65plus_share = ifelse(
+      sum(dat$deaths_65plus_2425) > 0,
+      sum(selected$deaths_65plus_2425) /
+        sum(dat$deaths_65plus_2425),
+      NA_real_
+    )
+  )
+}
+
+top_third_comparison <- purrr::pmap_dfr(
+  rule_specs,
+  function(rule, score_col) {
+    summarise_top_n(
+      rule_eval_2425,
+      score_col = score_col,
+      rule_name = rule,
+      n_select = N_SELECT
+    )
+  }
+)
+
+# Random reference at the identical number of municipalities.
+set.seed(20261002)
+N_RANDOM_TOP <- 2000L
+
+random_top <- purrr::map_dfr(seq_len(N_RANDOM_TOP), function(b) {
+  selected <- rule_eval_2425 %>%
+    slice_sample(n = N_SELECT, replace = FALSE)
+
+  tibble(
+    cases_captured = sum(selected$cases_2425),
+    cases_share = sum(selected$cases_2425) / sum(rule_eval_2425$cases_2425),
+    deaths_captured = sum(selected$deaths_2425),
+    deaths_share = sum(selected$deaths_2425) / sum(rule_eval_2425$deaths_2425),
+    pop_65plus_covered = sum(selected$mean_pop_65plus_2425),
+    pop_65plus_share = sum(selected$mean_pop_65plus_2425) /
+      sum(rule_eval_2425$mean_pop_65plus_2425),
+    deaths_65plus_captured = sum(selected$deaths_65plus_2425),
+    deaths_65plus_share = ifelse(
+      sum(rule_eval_2425$deaths_65plus_2425) > 0,
+      sum(selected$deaths_65plus_2425) /
+        sum(rule_eval_2425$deaths_65plus_2425),
+      NA_real_
+    )
+  )
+})
+
+random_top_summary <- random_top %>%
+  summarise(
+    rule = "Random",
+    n_selected = N_SELECT,
+    municipality_coverage = N_SELECT / N_MUNI,
+    cases_captured = median(cases_captured),
+    cases_share = median(cases_share),
+    deaths_captured = median(deaths_captured),
+    deaths_share = median(deaths_share),
+    pop_65plus_covered = median(pop_65plus_covered),
+    pop_65plus_share = median(pop_65plus_share),
+    deaths_65plus_captured = median(deaths_65plus_captured),
+    deaths_65plus_share = median(deaths_65plus_share),
+    random_cases_share_lo = quantile(cases_share, 0.025),
+    random_cases_share_hi = quantile(cases_share, 0.975),
+    random_deaths_share_lo = quantile(deaths_share, 0.025),
+    random_deaths_share_hi = quantile(deaths_share, 0.975),
+    random_deaths65_share_lo = quantile(deaths_65plus_share, 0.025, na.rm = TRUE),
+    random_deaths65_share_hi = quantile(deaths_65plus_share, 0.975, na.rm = TRUE)
+  )
+
+head_to_head_top_third <- bind_rows(
+  top_third_comparison,
+  random_top_summary
+)
+
+print(head_to_head_top_third)
+```
+
+## 12.2 Rank concordance
+
+This is a descriptive check of how much the expected-burden ranking differs from the simpler rankings.
+
+```{r head-to-head-rank-concordance}
+ranking_correlations <- tibble(
+  comparison = c(
+    "Expected-burden vs transmission-only",
+    "Expected-burden vs age/severity-only",
+    "Transmission-only vs age/severity-only"
+  ),
+  spearman_rho = c(
+    cor(rule_eval_2425$combined_burden,
+        rule_eval_2425$T_irr,
+        method = "spearman"),
+    cor(rule_eval_2425$combined_burden,
+        rule_eval_2425$V_burden,
+        method = "spearman"),
+    cor(rule_eval_2425$T_irr,
+        rule_eval_2425$V_burden,
+        method = "spearman")
+  )
+)
+
+print(ranking_correlations)
+```
+
+# 13. Cumulative capture curves
+
+The deterministic curves show retrospective capture under each fixed ranking. The random reference is summarized from repeated random municipality orderings; its shaded band is the 2.5th-97.5th percentile range across random orderings. The deterministic curves are point estimates here; this figure does not substitute for posterior uncertainty propagation in the ranking itself.
+
+```{r cumulative-capture-curves}
+make_capture_curve <- function(dat, score_col, rule_name) {
+
+  dat_ranked <- dat %>%
+    arrange(desc(.data[[score_col]]), code_muni)
+
+  total_cases <- sum(dat_ranked$cases_2425)
+  total_deaths <- sum(dat_ranked$deaths_2425)
+
+  dat_ranked %>%
+    mutate(
+      rank = row_number(),
+      coverage = rank / n(),
+      cum_cases_share = cumsum(cases_2425) / total_cases,
+      cum_deaths_share = if (total_deaths > 0) {
+        cumsum(deaths_2425) / total_deaths
+      } else {
+        rep(NA_real_, n())
+      }
+    ) %>%
+    select(rank, coverage, cum_cases_share, cum_deaths_share) %>%
+    mutate(rule = rule_name)
+}
+
+capture_curves <- purrr::pmap_dfr(
+  rule_specs,
+  function(rule, score_col) {
+    make_capture_curve(
+      rule_eval_2425,
+      score_col = score_col,
+      rule_name = rule
+    )
+  }
+)
+
+# Random-order uncertainty band. 500 permutations keeps memory/runtime modest.
+set.seed(20261002)
+N_RANDOM_CURVES <- 500L
+n_m <- nrow(rule_eval_2425)
+
+grid_rank <- seq_len(n_m)
+random_case_mat <- matrix(NA_real_, nrow = N_RANDOM_CURVES, ncol = n_m)
+random_death_mat <- matrix(NA_real_, nrow = N_RANDOM_CURVES, ncol = n_m)
+
+for (b in seq_len(N_RANDOM_CURVES)) {
+  ord <- sample.int(n_m, n_m, replace = FALSE)
+  random_case_mat[b, ] <- cumsum(rule_eval_2425$cases_2425[ord]) /
+    sum(rule_eval_2425$cases_2425)
+  random_death_mat[b, ] <- cumsum(rule_eval_2425$deaths_2425[ord]) /
+    sum(rule_eval_2425$deaths_2425)
+}
+
+random_curve_band <- tibble(
+  rank = grid_rank,
+  coverage = grid_rank / n_m,
+  cases_mid = apply(random_case_mat, 2, median),
+  cases_lo = apply(random_case_mat, 2, quantile, probs = 0.025),
+  cases_hi = apply(random_case_mat, 2, quantile, probs = 0.975),
+  deaths_mid = apply(random_death_mat, 2, median),
+  deaths_lo = apply(random_death_mat, 2, quantile, probs = 0.025),
+  deaths_hi = apply(random_death_mat, 2, quantile, probs = 0.975)
+)
+
+capture_long <- capture_curves %>%
+  pivot_longer(
+    cols = c(cum_cases_share, cum_deaths_share),
+    names_to = "outcome",
+    values_to = "captured_share"
+  ) %>%
+  mutate(
+    outcome = recode(
+      outcome,
+      cum_cases_share = "Observed cases, 2024-2025",
+      cum_deaths_share = "Observed deaths, 2024-2025"
+    )
+  )
+
+random_band_long <- bind_rows(
+  random_curve_band %>%
+    transmute(
+      coverage,
+      outcome = "Observed cases, 2024-2025",
+      mid = cases_mid, lo = cases_lo, hi = cases_hi
+    ),
+  random_curve_band %>%
+    transmute(
+      coverage,
+      outcome = "Observed deaths, 2024-2025",
+      mid = deaths_mid, lo = deaths_lo, hi = deaths_hi
+    )
+)
+
+fig_head_to_head <- ggplot() +
+  geom_ribbon(
+    data = random_band_long,
+    aes(x = coverage, ymin = lo, ymax = hi),
+    alpha = 0.15
+  ) +
+  geom_line(
+    data = random_band_long,
+    aes(x = coverage, y = mid, linetype = "Random"),
+    linewidth = 0.7
+  ) +
+  geom_line(
+    data = capture_long,
+    aes(x = coverage, y = captured_share, linetype = rule),
+    linewidth = 0.9
+  ) +
+  geom_vline(
+    xintercept = N_SELECT / N_MUNI,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  facet_wrap(~ outcome, nrow = 1) +
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Municipalities prioritized",
+    y = "Cumulative share captured",
+    linetype = NULL
+  ) +
+  theme_classic(base_family = "sans", base_size = 10) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+print(fig_head_to_head)
+```
+
+# 14. Save head-to-head outputs
+
+```{r save-head-to-head-outputs}
+write_csv(
+  rule_eval_2425,
+  file.path(results_dir, "priority_rule_evaluation_municipality_2024_2025.csv")
+)
+
+write_csv(
+  head_to_head_top_third,
+  file.path(results_dir, "priority_rule_head_to_head_top_third_2024_2025.csv")
+)
+
+write_csv(
+  ranking_correlations,
+  file.path(results_dir, "priority_rule_rank_correlations_2024_2025.csv")
+)
+
+write_csv(
+  capture_long,
+  file.path(results_dir, "priority_rule_cumulative_capture_2024_2025.csv")
+)
+
+write_csv(
+  random_band_long,
+  file.path(results_dir, "priority_rule_random_reference_band_2024_2025.csv")
+)
+
+ggsave(
+  file.path(results_dir, "priority_rule_head_to_head_2024_2025.png"),
+  fig_head_to_head,
+  width = 8.5,
+  height = 3.6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(results_dir, "priority_rule_head_to_head_2024_2025.pdf"),
+  fig_head_to_head,
+  width = 8.5,
+  height = 3.6
+)
+
+cat("Saved head-to-head comparison outputs to:", results_dir, "\n")
+
+
+
+fig5 <- ggplot() +
+  
+  geom_ribbon(
+    data = random_band_long,
+    aes(
+      x = coverage,
+      ymin = lo,
+      ymax = hi
+    ),
+    fill = "grey80",
+    alpha = 0.22
+  ) +
+  
+  geom_line(
+    data = random_band_long,
+    aes(
+      x = coverage,
+      y = mid,
+      colour = "Random"
+    ),
+    linewidth = 0.7,
+    linetype = "dashed"
+  ) +
+  
+  geom_line(
+    data = capture_long,
+    aes(
+      x = coverage,
+      y = captured_share,
+      colour = rule,
+      linewidth = rule
+    )
+  ) +
+  
+  geom_vline(
+    xintercept = N_SELECT / N_MUNI,
+    linetype = "dashed",
+    colour = "grey55",
+    linewidth = 0.45
+  ) +
+  
+  facet_wrap(
+    ~ outcome,
+    nrow = 1
+  ) +
+  
+  scale_colour_manual(
+    values = c(
+      "Expected burden" = "#0072B2",
+      "Transmission only" = "#D55E00",
+      "Age-structured severity burden" = "#009E73",
+      "Random" = "grey45"
+    ),
+    breaks = c(
+      "Expected burden",
+      "Transmission only",
+      "Age-structured severity burden",
+      "Random"
+    )
+  ) +
+  
+  scale_linewidth_manual(
+    values = c(
+      "Expected burden" = 1.25,
+      "Transmission only" = 0.95,
+      "Age-structured severity burden" = 0.95
+    ),
+    guide = "none"
+  ) +
+  
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    limits = c(0, 1),
+    expand = expansion(mult = 0)
+  ) +
+  
+  scale_y_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    limits = c(0, 1),
+    expand = expansion(mult = 0)
+  ) +
+  
+  labs(
+    x = "Municipalities prioritised",
+    y = "Cumulative share captured",
+    colour = NULL
+  ) +
+  
+  theme_classic(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    legend.key.width = unit(1.8, "lines"),
+    strip.background = element_blank(),
+    strip.text = element_text(
+      face = "bold",
+      size = 11,
+      hjust = 0
+    ),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9.5),
+    panel.spacing = unit(1.3, "lines"),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+fig5
+
+fig5 <- fig5 +
+  annotate(
+    "text",
+    x = N_SELECT / N_MUNI,
+    y = 0.985,
+    label = "Top third\n33.3%",
+    hjust = 0.5,
+    vjust = 1,
+    size = 3.1,
+    colour = "grey35"
+  )
+
+fig5
+
+ggsave(
+  file.path(results_dir, "figure5_priority_rule_head_to_head_2024_2025.png"),
+  fig5,
+  width = 8.5,
+  height = 3.6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(results_dir, "figure5_priority_rule_head_to_head_2024_2025.pdf"),
+  fig5,
+  width = 8.5,
+  height = 3.6
+)
+```
+
+# Additional interpretation guardrails for the rule comparison
+
+- The head-to-head comparison is retrospective: it asks which fixed 2024-2025 ranking captures more of the observed 2024-2025 burden at identical municipality coverage.
+- `Age/severity-only` is ranked by `V_burden`, i.e. age-specific observed CFR weighted by municipality population, without the transmission term.
+- `Expected-burden` is ranked by `T_irr * V_burden`.
+- The random band reflects variation across random municipality orderings only; it is not posterior uncertainty in the INLA-derived transmission surface.
+- Captured cases and deaths are observed notified outcomes and must not be described as cases or deaths prevented.
+- The revised top-third threshold is 1,857 of 5,570 municipalities (33.34%), replacing the obsolete 1,293-of-3,879 threshold from the earlier restricted-municipality analysis.
+
+
+
+# 15. Transmission-population sensitivity analysis
+# Compare the age-weighted combined ranking against
+# transmission x total population at matched top-third coverage.
+
+```{r transmission-population-sensitivity}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+
+# Reuse the existing 2024-2025 evaluation dataset.
+pop_sensitivity_data <- rule_eval_2425 %>%
+  left_join(
+    priority_metric_2425 %>%
+      select(code_muni, total_pop),
+    by = "code_muni"
+  ) %>%
+  mutate(
+    tx_population = T_irr * total_pop
+  )
+
+stopifnot(
+  nrow(pop_sensitivity_data) == 5570L,
+  n_distinct(pop_sensitivity_data$code_muni) == 5570L,
+  all(is.finite(pop_sensitivity_data$total_pop)),
+  all(is.finite(pop_sensitivity_data$tx_population))
+)
+
+# Five strategies evaluated at exactly the same coverage.
+strategy_cols <- c(
+  "Transmission-only" = "T_irr",
+  "Age/severity-only" = "V_burden",
+  "Expected-burden" = "combined_burden",
+  "Population-only" = "total_pop",
+  "Transmission x population" = "tx_population"
+)
+
+N_SELECT <- ceiling(nrow(pop_sensitivity_data) / 3)
+
+population_sensitivity <- map_dfr(
+  names(strategy_cols),
+  function(strategy) {
+
+    score_col <- strategy_cols[[strategy]]
+
+    selected <- pop_sensitivity_data %>%
+      arrange(desc(.data[[score_col]]), code_muni) %>%
+      slice_head(n = N_SELECT)
+
+    tibble(
+      strategy = strategy,
+      n_municipalities = nrow(selected),
+      population_covered = sum(selected$total_pop),
+      population_pct = 100 *
+        sum(selected$total_pop) /
+        sum(pop_sensitivity_data$total_pop),
+      cases_captured = sum(selected$cases_2425),
+      cases_pct = 100 *
+        sum(selected$cases_2425) /
+        sum(pop_sensitivity_data$cases_2425),
+      deaths_captured = sum(selected$deaths_2425),
+      deaths_pct = 100 *
+        sum(selected$deaths_2425) /
+        sum(pop_sensitivity_data$deaths_2425)
+    )
+  }
+)
+
+# Full-precision results for reproducibility.
+print(population_sensitivity, n = Inf, width = Inf)
+
+# Comparison of the two combined ranking rules.
+rank_comparison <- tibble(
+  spearman_rho = cor(
+    pop_sensitivity_data$combined_burden,
+    pop_sensitivity_data$tx_population,
+    method = "spearman"
+  ),
+  top_third_overlap = {
+    top_age <- pop_sensitivity_data %>%
+      arrange(desc(combined_burden), code_muni) %>%
+      slice_head(n = N_SELECT) %>%
+      pull(code_muni)
+
+    top_pop <- pop_sensitivity_data %>%
+      arrange(desc(tx_population), code_muni) %>%
+      slice_head(n = N_SELECT) %>%
+      pull(code_muni)
+
+    length(intersect(top_age, top_pop))
+  }
+) %>%
+  mutate(
+    top_third_overlap_pct = 100 *
+      top_third_overlap / N_SELECT
+  )
+
+print(rank_comparison)
+
+# Save separate sensitivity outputs.
+write_csv(
+  population_sensitivity,
+  file.path(
+    results_dir,
+    "transmission_population_sensitivity_2024_2025.csv"
+  )
+)
+
+write_csv(
+  rank_comparison,
+  file.path(
+    results_dir,
+    "transmission_population_rank_concordance_2024_2025.csv"
+  )
+)
+```

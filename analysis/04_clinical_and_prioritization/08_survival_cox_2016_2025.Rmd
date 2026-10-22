@@ -1,0 +1,423 @@
+---
+title: "08 - Survival Analysis and Cox Regression (Revised 2016-2025)"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+
+# Upstream requirement:
+#   01_data_import_cleaning.Rmd -> Chik_total
+# Chik_total is already the confirmed chikungunya analytic population.
+
+STUDY_START_YEAR <- 2016L
+STUDY_END_YEAR   <- 2025L
+STUDY_START_DATE <- as.Date("2016-01-01")
+STUDY_END_DATE   <- as.Date("2025-12-31")
+STUDY_LABEL      <- "2016-2025"
+FOLLOWUP_DAYS    <- 180L
+
+stopifnot(
+  exists("Chik_total"),
+  all(Chik_total$CLASSI_FIN %in% c(1, 13)),
+  all(as.Date(Chik_total$DT_SIN_PRI) >= STUDY_START_DATE),
+  all(as.Date(Chik_total$DT_SIN_PRI) <= STUDY_END_DATE)
+)
+
+chik <- Chik_total %>%
+  mutate(
+    onset = as.Date(DT_SIN_PRI),
+    hosp  = as.Date(DT_INTERNA),
+    death = as.Date(DT_OBITO),
+    end_fu = as.Date(DT_ENCERRA),
+    # Force missing outcome indicators to FALSE so status never becomes NA.
+    is_death = dplyr::coalesce(EVOLUCAO == 2, FALSE),
+    is_hosp  = dplyr::coalesce(as.character(HOSPITALIZ) == "1", FALSE) & !is.na(hosp),
+    age_group_surv10 = factor(
+      as.character(age_group_surv10),
+      levels = c("<1", "1-9", "10-19", "20-29", "30-39",
+                 "40-49", "50-59", "60-69", "70-79", ">=80")
+    ),
+    sex = case_when(
+      CS_SEXO == "F" ~ "Female",
+      CS_SEXO == "M" ~ "Male",
+      TRUE ~ NA_character_
+    ),
+    sex = factor(sex, levels = c("Female", "Male")),
+    race5 = case_when(
+      race_label %in% c("Asian", "Black", "Indigenous", "Pardo (Mixed)", "White") ~ race_label,
+      TRUE ~ NA_character_
+    ),
+    race5 = factor(
+      race5,
+      levels = c("Pardo (Mixed)", "White", "Black", "Asian", "Indigenous")
+    )
+  )
+```
+
+## Construct valid 180-day survival datasets
+
+The original file clipped all event times above 180 days to day 180 while retaining
+`status = 1`, which incorrectly converts later events into events at the administrative
+censoring boundary. Here, events after 180 days are treated as censored at 180 days.
+For onset-based intervals, closure/censoring time is measured from symptom onset;
+for the hospitalization-to-death interval it is measured from hospital admission.
+
+```{r survival-dataset-builder}
+build_surv_dataset <- function(df, interval, horizon = FOLLOWUP_DAYS) {
+
+  if (!interval %in% c("onset_to_hosp", "hosp_to_death", "onset_to_death")) {
+    stop("Unknown interval: ", interval)
+  }
+
+  if (interval == "onset_to_hosp") {
+    d <- df %>%
+      mutate(
+        event_day = as.numeric(hosp - onset),
+        censor_day = as.numeric(end_fu - onset),
+        event_recorded = is_hosp & !is.na(event_day) & event_day >= 0
+      )
+  }
+
+  if (interval == "onset_to_death") {
+    d <- df %>%
+      mutate(
+        event_day = as.numeric(death - onset),
+        censor_day = as.numeric(end_fu - onset),
+        event_recorded = is_death & !is.na(event_day) & event_day >= 0
+      )
+  }
+
+  if (interval == "hosp_to_death") {
+    d <- df %>%
+      filter(is_hosp, !is.na(hosp)) %>%
+      mutate(
+        event_day = as.numeric(death - hosp),
+        censor_day = as.numeric(end_fu - hosp),
+        event_recorded = is_death & !is.na(event_day) & event_day >= 0
+      )
+  }
+
+  d %>%
+    mutate(
+      # Negative closure intervals are invalid and cannot define censoring.
+      censor_day = if_else(!is.na(censor_day) & censor_day >= 0,
+                           censor_day, NA_real_),
+
+      # An event must occur before the administrative horizon and, when a
+      # closure date exists, no later than the recorded closure date.
+      event_within_followup = event_recorded &
+        event_day <= horizon &
+        (is.na(censor_day) | event_day <= censor_day),
+
+      status = as.integer(event_within_followup),
+
+      # If an event is known to have occurred after 180 days, the record is
+      # known to be event-free through day 180 even if closure is unavailable.
+      known_beyond_horizon = event_recorded & event_day > horizon,
+
+      t_obs = case_when(
+        event_within_followup ~ event_day,
+        known_beyond_horizon ~ as.numeric(horizon),
+        !is.na(censor_day) ~ pmin(censor_day, as.numeric(horizon)),
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    filter(!is.na(t_obs), t_obs >= 0, t_obs <= horizon)
+}
+
+intervals <- c("onset_to_hosp", "hosp_to_death", "onset_to_death")
+
+surv_data <- setNames(
+  lapply(intervals, function(x) build_surv_dataset(chik, x)),
+  intervals
+)
+
+surv_audit <- bind_rows(lapply(names(surv_data), function(int_name) {
+  d <- surv_data[[int_name]]
+  tibble(
+    interval = int_name,
+    n = nrow(d),
+    events_180d = sum(d$status, na.rm = TRUE),
+    censored_180d = sum(d$status == 0L, na.rm = TRUE),
+    median_followup_days = median(d$t_obs, na.rm = TRUE)
+  )
+}))
+
+print(surv_audit)
+```
+
+## Kaplan-Meier curves
+
+```{r km-functions}
+interval_labels <- c(
+  onset_to_hosp  = "Symptom onset to hospitalization",
+  hosp_to_death  = "Hospitalization to death",
+  onset_to_death = "Symptom onset to death"
+)
+
+group_specs <- list(
+  age = list(var = "age_group_surv10", ref = "20-29"),
+  sex = list(var = "sex", ref = "Female"),
+  race = list(var = "race5", ref = "Pardo (Mixed)")
+)
+
+prepare_group <- function(d, var, ref = NULL) {
+  out <- d %>% filter(!is.na(.data[[var]]))
+  out$grp <- factor(out[[var]])
+  if (!is.null(ref) && ref %in% levels(out$grp)) {
+    out$grp <- relevel(out$grp, ref = ref)
+  }
+  out
+}
+
+plot_km <- function(d, interval, group_name, horizon = FOLLOWUP_DAYS) {
+  spec <- group_specs[[group_name]]
+  dd <- prepare_group(d, spec$var, spec$ref)
+
+  if (nrow(dd) < 10 || n_distinct(dd$grp) < 2) return(NULL)
+
+  survfit2(Surv(t_obs, status) ~ grp, data = dd) |>
+    ggsurvfit() +
+    add_confidence_interval() +
+    add_risktable(
+      risktable_stats = c("{n.risk}", "{n.censor}"),
+      risktable_height = 0.35
+    ) +
+    coord_cartesian(xlim = c(0, horizon)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title = paste0(interval_labels[[interval]], " by ", group_name),
+      subtitle = paste0("Confirmed chikungunya, Brazil, ", STUDY_LABEL,
+                        "; administrative horizon = ", horizon, " days"),
+      x = "Days",
+      y = "Event-free survival probability",
+      color = NULL
+    )
+}
+```
+
+```{r km-plots}
+km_plots <- list()
+
+for (int_name in intervals) {
+  for (gname in names(group_specs)) {
+    key <- paste(int_name, gname, sep = "__")
+    p <- plot_km(surv_data[[int_name]], int_name, gname)
+    km_plots[[key]] <- p
+    if (!is.null(p)) print(p)
+  }
+}
+```
+
+## Log-rank tests
+
+```{r log-rank-tests}
+logrank_results <- list()
+
+for (int_name in intervals) {
+  for (gname in names(group_specs)) {
+    spec <- group_specs[[gname]]
+    d <- prepare_group(surv_data[[int_name]], spec$var, spec$ref)
+
+    if (nrow(d) < 10 || n_distinct(d$grp) < 2) next
+
+    lr <- survdiff(Surv(t_obs, status) ~ grp, data = d)
+    p_val <- 1 - pchisq(lr$chisq, df = length(lr$n) - 1)
+
+    key <- paste(int_name, gname, sep = "__")
+    logrank_results[[key]] <- list(test = lr, p_value = p_val)
+
+    cat("\n", key, "\n", sep = "")
+    print(lr)
+    cat("Log-rank p-value:", format.pval(p_val, digits = 3), "\n")
+  }
+}
+```
+
+## Univariable Cox models
+
+Age uses 20-29 years as the explicit reference group, sex uses female as the
+reference group, and race/ethnicity uses Pardo (Mixed) as the reference group.
+
+```{r univariable-cox}
+run_univariable_cox <- function(d, var, ref = NULL) {
+  dd <- d %>%
+    filter(
+      !is.na(.data[[var]]),
+      !is.na(status),
+      !is.na(t_obs)
+    )
+
+  dd$grp <- factor(dd[[var]])
+  if (!is.null(ref) && ref %in% levels(dd$grp)) {
+    dd$grp <- relevel(dd$grp, ref = ref)
+  }
+
+  # x = TRUE is needed for cox.zph(), but the fitted Cox object can be very
+  # large with ~1.2 million records. Compute the small summaries first, then
+  # explicitly discard the full fit/design matrix before returning.
+  fit <- coxph(
+    Surv(t_obs, status) ~ grp,
+    data = dd,
+    ties = "efron",
+    x = TRUE,
+    model = FALSE,
+    y = FALSE
+  )
+
+  tidy_res <- broom::tidy(fit, exponentiate = TRUE, conf.int = TRUE)
+  ph_res <- cox.zph(fit)
+  n_res <- nrow(dd)
+  events_res <- sum(dd$status, na.rm = TRUE)
+
+  rm(fit, dd)
+  invisible(gc())
+
+  list(
+    tidy = tidy_res,
+    ph = ph_res,
+    n = n_res,
+    events = events_res
+  )
+}
+
+cox_univariable <- list()
+
+for (int_name in intervals) {
+  for (gname in names(group_specs)) {
+    spec <- group_specs[[gname]]
+    key <- paste(int_name, gname, sep = "__")
+
+    res <- run_univariable_cox(
+      surv_data[[int_name]],
+      var = spec$var,
+      ref = spec$ref
+    )
+
+    cox_univariable[[key]] <- res
+
+    cat("\n==============================\n")
+    cat(key, "| n =", res$n, "| events =", res$events, "\n")
+    print(res$tidy)
+    cat("\nProportional-hazards test:\n")
+    print(res$ph)
+  }
+}
+```
+
+## Mutually adjusted Cox sensitivity models
+
+These models jointly adjust for age group, sex, and race/ethnicity. They use a
+common complete-case population within each survival interval, so their sample
+sizes differ from the corresponding univariable analyses.
+
+```{r adjusted-cox}
+run_adjusted_cox <- function(d) {
+  dd <- d %>%
+    filter(
+      !is.na(age_group_surv10),
+      !is.na(sex),
+      !is.na(race5),
+      !is.na(status),
+      !is.na(t_obs)
+    ) %>%
+    mutate(
+      age_group_surv10 = relevel(factor(age_group_surv10), ref = "20-29"),
+      sex = relevel(factor(sex), ref = "Female"),
+      race5 = relevel(factor(race5), ref = "Pardo (Mixed)")
+    )
+
+  fit <- coxph(
+    Surv(t_obs, status) ~ age_group_surv10 + sex + race5,
+    data = dd,
+    ties = "efron",
+    x = TRUE,
+    model = FALSE,
+    y = FALSE
+  )
+
+  tidy_res <- broom::tidy(fit, exponentiate = TRUE, conf.int = TRUE)
+  ph_res <- cox.zph(fit)
+  n_res <- nrow(dd)
+  events_res <- sum(dd$status, na.rm = TRUE)
+
+  rm(fit, dd)
+  invisible(gc())
+
+  list(
+    tidy = tidy_res,
+    ph = ph_res,
+    n = n_res,
+    events = events_res
+  )
+}
+
+# Run one interval at a time and retain only compact summaries. This avoids
+# keeping several million-row Cox design matrices in memory simultaneously.
+cox_adjusted <- list()
+for (int_name in intervals) {
+  cox_adjusted[[int_name]] <- run_adjusted_cox(surv_data[[int_name]])
+  invisible(gc())
+}
+
+for (int_name in intervals) {
+  res <- cox_adjusted[[int_name]]
+  cat("\n==============================\n")
+  cat("Adjusted model:", int_name, "| n =", res$n, "| events =", res$events, "\n")
+  print(res$tidy)
+  cat("\nProportional-hazards test:\n")
+  print(res$ph)
+}
+```
+
+## Age-specific death gradient for downstream severity analyses
+
+This extracts the age coefficients from the primary univariable death models.
+Hazard ratios are relative hazards, not absolute mortality risks; downstream
+expected-burden calculations must not treat these HRs alone as probabilities.
+
+```{r export-age-gradients}
+age_hr_onset_death <- cox_univariable[["onset_to_death__age"]]$tidy %>%
+  transmute(
+    interval = "onset_to_death",
+    term,
+    HR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p_value = p.value
+  )
+
+age_hr_hosp_death <- cox_univariable[["hosp_to_death__age"]]$tidy %>%
+  transmute(
+    interval = "hosp_to_death",
+    term,
+    HR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p_value = p.value
+  )
+
+age_hr_export <- bind_rows(age_hr_onset_death, age_hr_hosp_death)
+print(age_hr_export)
+```
+
+## Scope and internal-consistency checks
+
+```{r scope-sanity}
+cat("Study period:", STUDY_LABEL, "\n")
+cat("Confirmed chikungunya cases:", nrow(chik), "\n")
+cat("Recorded deaths:", sum(chik$is_death, na.rm = TRUE), "\n")
+cat("Recorded hospitalizations with admission date:", sum(chik$is_hosp, na.rm = TRUE), "\n")
+
+stopifnot(
+  min(chik$onset, na.rm = TRUE) >= STUDY_START_DATE,
+  max(chik$onset, na.rm = TRUE) <= STUDY_END_DATE,
+  all(vapply(surv_data, function(x) all(x$t_obs >= 0 & x$t_obs <= FOLLOWUP_DAYS), logical(1))),
+  all(vapply(surv_data, function(x) all(x$status %in% c(0L, 1L)), logical(1))),
+  all(c("onset_to_hosp", "hosp_to_death", "onset_to_death") %in% names(cox_adjusted))
+)
+```

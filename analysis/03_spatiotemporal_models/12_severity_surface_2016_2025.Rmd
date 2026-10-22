@@ -1,0 +1,385 @@
+---
+title: "12 - Severity Surface (Deaths + Hospitalizations per 100,000), Brazil 2016–2025"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+source("00_setup.R")
+
+# ------------------------------------------------------------------
+# Analysis settings
+# ------------------------------------------------------------------
+STUDY_YEARS <- 2016:2025
+EXPECTED_N_HR <- 439L
+RESULT_DIR <- path.expand("~/Downloads/inla_results")
+dir.create(RESULT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# This file uses the cleaned confirmed-case data and the municipality-year
+# population panel produced earlier in the pipeline, but it rebuilds the
+# health-region crosswalk itself and does NOT depend on objects from File 11.
+if (!exists("Chik_total")) {
+  stop("Object 'Chik_total' not found. Run 01_data_import_cleaning.Rmd first.")
+}
+if (!exists("pop_panel_total")) {
+  stop("Object 'pop_panel_total' not found. Run 02_population_panel.R first.")
+}
+```
+
+## Purpose
+
+Hospitalized case fatality is conditioned on notification, admission thresholds,
+and hospital access, all of which may vary geographically. This file therefore
+constructs population-denominated severity outcomes at SUS health-region level:
+
+- **deaths per 100,000 population**, and
+- **hospitalizations per 100,000 population**.
+
+The analysis covers **2016–2025**, matching the revised study period. This file
+is descriptive and contains no new INLA model. It is self-contained with respect
+to the SUS health-region crosswalk and does not require File 11 to be run first.
+
+## SUS health-region crosswalk
+
+```{r health-region-crosswalk}
+# Use the current 2025 SUS health-region definition, matching the convention
+# used in the shared-component analysis.
+health_regions_sf <- geobr::read_health_region(
+  year = 2025,
+  showProgress = FALSE
+) %>%
+  sf::st_make_valid()
+
+required_hr_cols <- c("code_muni", "code_health_region")
+missing_hr_cols <- setdiff(required_hr_cols, names(health_regions_sf))
+if (length(missing_hr_cols) > 0) {
+  stop(
+    "Expected geobr health-region columns are missing: ",
+    paste(missing_hr_cols, collapse = ", "),
+    ". Available columns: ",
+    paste(names(health_regions_sf), collapse = ", ")
+  )
+}
+
+muni_to_health_region <- health_regions_sf %>%
+  sf::st_drop_geometry() %>%
+  transmute(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    code_health_region = as.character(code_health_region)
+  ) %>%
+  distinct()
+
+# Every municipality should map to only one health region.
+muni_map_check <- muni_to_health_region %>%
+  count(code_muni, name = "n_hr") %>%
+  filter(n_hr != 1)
+
+if (nrow(muni_map_check) > 0) {
+  stop("At least one municipality maps to multiple health regions.")
+}
+
+hr_levels <- sort(unique(muni_to_health_region$code_health_region))
+
+cat("Municipalities in health-region crosswalk:",
+    n_distinct(muni_to_health_region$code_muni), "\n")
+cat("Distinct SUS health regions:", length(hr_levels), "\n")
+
+if (length(hr_levels) != EXPECTED_N_HR) {
+  stop(
+    "Expected ", EXPECTED_N_HR,
+    " SUS health regions but found ", length(hr_levels), "."
+  )
+}
+```
+
+## Confirmed cases, deaths, and hospitalizations
+
+```{r severity-counts}
+chik_severity_base <- Chik_total %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(DT_SIN_PRI)
+  ) %>%
+  mutate(
+    year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
+    code_muni = stringr::str_pad(
+      substr(as.character(ID_MUNICIP), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    is_death = as.character(EVOLUCAO) == "2",
+    is_hosp  = as.character(HOSPITALIZ) == "1"
+  ) %>%
+  filter(year %in% STUDY_YEARS) %>%
+  left_join(muni_to_health_region, by = "code_muni")
+
+# Do not silently drop records that fail the geography crosswalk.
+geo_audit <- chik_severity_base %>%
+  summarise(
+    n_confirmed = n(),
+    n_unmapped = sum(is.na(code_health_region)),
+    deaths_total = sum(is_death, na.rm = TRUE),
+    deaths_unmapped = sum(is_death & is.na(code_health_region), na.rm = TRUE),
+    hosp_total = sum(is_hosp, na.rm = TRUE),
+    hosp_unmapped = sum(is_hosp & is.na(code_health_region), na.rm = TRUE)
+  )
+
+print(geo_audit)
+
+if (geo_audit$n_unmapped > 0) {
+  stop(
+    "There are ", geo_audit$n_unmapped,
+    " confirmed records without a SUS health-region mapping. Resolve before continuing."
+  )
+}
+
+chik_severity_base <- chik_severity_base %>%
+  filter(!is.na(code_health_region))
+
+deaths_by_hr_year <- chik_severity_base %>%
+  filter(is_death) %>%
+  count(code_health_region, year, name = "deaths")
+
+hosp_by_hr_year <- chik_severity_base %>%
+  filter(is_hosp) %>%
+  count(code_health_region, year, name = "hospitalizations")
+
+cat("Health-region-years with at least one death:",
+    nrow(deaths_by_hr_year), "\n")
+cat("Health-region-years with at least one hospitalization:",
+    nrow(hosp_by_hr_year), "\n")
+```
+
+## Population by health-region-year
+
+```{r severity-population}
+pop_hr_year <- pop_panel_total %>%
+  mutate(
+    year = as.integer(year),
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  ) %>%
+  filter(year %in% STUDY_YEARS) %>%
+  left_join(muni_to_health_region, by = "code_muni")
+
+pop_geo_audit <- pop_hr_year %>%
+  summarise(
+    n_rows = n(),
+    n_unmapped = sum(is.na(code_health_region)),
+    n_missing_pop = sum(is.na(total_pop)),
+    n_nonpositive_pop = sum(total_pop <= 0, na.rm = TRUE)
+  )
+
+print(pop_geo_audit)
+
+if (pop_geo_audit$n_unmapped > 0 ||
+    pop_geo_audit$n_missing_pop > 0 ||
+    pop_geo_audit$n_nonpositive_pop > 0) {
+  stop("Population geography/denominator audit failed.")
+}
+
+pop_hr_year <- pop_hr_year %>%
+  group_by(code_health_region, year) %>%
+  summarise(pop = sum(total_pop), .groups = "drop")
+```
+
+## Build the complete severity surface
+
+```{r severity-surface}
+severity_surface <- tidyr::expand_grid(
+  code_health_region = hr_levels,
+  year = STUDY_YEARS
+) %>%
+  left_join(deaths_by_hr_year,
+            by = c("code_health_region", "year")) %>%
+  left_join(hosp_by_hr_year,
+            by = c("code_health_region", "year")) %>%
+  left_join(pop_hr_year,
+            by = c("code_health_region", "year")) %>%
+  mutate(
+    deaths = tidyr::replace_na(deaths, 0L),
+    hospitalizations = tidyr::replace_na(hospitalizations, 0L)
+  )
+
+EXPECTED_ROWS <- EXPECTED_N_HR * length(STUDY_YEARS)
+
+surface_audit <- severity_surface %>%
+  summarise(
+    n_rows = n(),
+    n_regions = n_distinct(code_health_region),
+    n_years = n_distinct(year),
+    n_missing_pop = sum(is.na(pop)),
+    n_nonpositive_pop = sum(pop <= 0, na.rm = TRUE),
+    total_deaths = sum(deaths),
+    total_hospitalizations = sum(hospitalizations)
+  )
+
+print(surface_audit)
+
+stopifnot(
+  nrow(severity_surface) == EXPECTED_ROWS,
+  n_distinct(severity_surface$code_health_region) == EXPECTED_N_HR,
+  identical(sort(unique(severity_surface$year)), STUDY_YEARS),
+  surface_audit$n_missing_pop == 0,
+  surface_audit$n_nonpositive_pop == 0,
+  !anyDuplicated(severity_surface[c("code_health_region", "year")]),
+  surface_audit$total_deaths == sum(chik_severity_base$is_death, na.rm = TRUE),
+  surface_audit$total_hospitalizations == sum(chik_severity_base$is_hosp, na.rm = TRUE)
+)
+
+severity_surface <- severity_surface %>%
+  mutate(
+    deaths_per_100k = 1e5 * deaths / pop,
+    hosp_per_100k   = 1e5 * hospitalizations / pop
+  ) %>%
+  arrange(year, code_health_region)
+
+cat("\nHealth-region-years in severity surface:",
+    nrow(severity_surface),
+    "(expected", EXPECTED_ROWS, ")\n")
+
+cat("\n=== Deaths per 100,000 ===\n")
+print(summary(severity_surface$deaths_per_100k))
+
+cat("\n=== Hospitalizations per 100,000 ===\n")
+print(summary(severity_surface$hosp_per_100k))
+```
+
+## Descriptive association between the two severity outcomes
+
+These correlations are descriptive checks only. They do not constitute a
+causal analysis or a formal test of the case-death spatial concordance addressed
+by the shared-component model in File 11.
+
+```{r severity-correlations}
+severity_correlations <- tibble(
+  period = c("2016-2025", "2024-2025"),
+  pearson = c(
+    cor(
+      severity_surface$deaths_per_100k,
+      severity_surface$hosp_per_100k,
+      method = "pearson",
+      use = "complete.obs"
+    ),
+    severity_surface %>%
+      filter(year %in% 2024:2025) %>%
+      summarise(
+        r = cor(
+          deaths_per_100k,
+          hosp_per_100k,
+          method = "pearson",
+          use = "complete.obs"
+        )
+      ) %>%
+      pull(r)
+  ),
+  spearman = c(
+    cor(
+      severity_surface$deaths_per_100k,
+      severity_surface$hosp_per_100k,
+      method = "spearman",
+      use = "complete.obs"
+    ),
+    severity_surface %>%
+      filter(year %in% 2024:2025) %>%
+      summarise(
+        rho = cor(
+          deaths_per_100k,
+          hosp_per_100k,
+          method = "spearman",
+          use = "complete.obs"
+        )
+      ) %>%
+      pull(rho)
+  )
+)
+
+print(severity_correlations)
+
+n_hosp_no_death <- severity_surface %>%
+  filter(hospitalizations > 50, deaths == 0) %>%
+  nrow()
+
+cat(
+  "Health-region-years with >50 hospitalizations but 0 deaths:",
+  n_hosp_no_death,
+  "\n"
+)
+```
+
+## 2024–2025 summary
+
+```{r recent-summary}
+severity_recent_summary <- severity_surface %>%
+  filter(year %in% 2024:2025) %>%
+  group_by(year) %>%
+  summarise(
+    health_regions = n(),
+    population = sum(pop),
+    deaths = sum(deaths),
+    hospitalizations = sum(hospitalizations),
+    deaths_per_100k_national = 1e5 * deaths / population,
+    hosp_per_100k_national = 1e5 * hospitalizations / population,
+    median_hr_deaths_per_100k = median(deaths_per_100k),
+    median_hr_hosp_per_100k = median(hosp_per_100k),
+    .groups = "drop"
+  )
+
+print(severity_recent_summary)
+```
+
+## Save outputs
+
+```{r save-severity-surface}
+severity_rds <- file.path(
+  RESULT_DIR,
+  "severity_surface_2016_2025.rds"
+)
+severity_csv <- file.path(
+  RESULT_DIR,
+  "severity_surface_2016_2025.csv"
+)
+cor_csv <- file.path(
+  RESULT_DIR,
+  "severity_correlations_2016_2025.csv"
+)
+recent_csv <- file.path(
+  RESULT_DIR,
+  "severity_2024_2025_summary.csv"
+)
+
+saveRDS(severity_surface, severity_rds)
+readr::write_csv(severity_surface, severity_csv)
+readr::write_csv(severity_correlations, cor_csv)
+readr::write_csv(severity_recent_summary, recent_csv)
+
+cat("Saved:\n")
+cat(" -", severity_rds, "\n")
+cat(" -", severity_csv, "\n")
+cat(" -", cor_csv, "\n")
+cat(" -", recent_csv, "\n")
+```
+
+## Interpretation and downstream role
+
+`severity_surface` is the formal **population-denominated geographic severity
+surface** for the revised 2016–2025 analysis. It supports description of where
+severe chikungunya outcomes were concentrated and provides a rate-based severity
+counterpart to the reported-case geography.
+
+It should **not** be described as the direct input to the municipality-level
+expected-burden metric in File 13. File 13 constructs its age-weighted severity
+vulnerability from municipality age composition and observed age-specific
+mortality risk; the present file is a complementary geographic severity analysis.

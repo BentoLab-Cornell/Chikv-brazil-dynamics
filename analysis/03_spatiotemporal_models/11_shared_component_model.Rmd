@@ -1,0 +1,1012 @@
+---
+title: "11 - Shared Component Model (2016-2025)"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+source("00_setup.R")
+
+
+# Assumes:
+#   - Chik_total from 01_data_import_cleaning.Rmd
+#   - pop_panel_total from 02_population_panel.R
+
+STUDY_START_YEAR <- 2016L
+STUDY_END_YEAR   <- 2025L
+STUDY_YEARS      <- STUDY_START_YEAR:STUDY_END_YEAR
+
+results_dir <- path.expand("~/Downloads/inla_results")
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+stopifnot(
+  exists("Chik_total"),
+  exists("pop_panel_total"),
+  all(lubridate::year(as.Date(Chik_total$DT_SIN_PRI)) %in% STUDY_YEARS)
+)
+```
+
+## SUS health-region crosswalk and adjacency graph
+
+```{r health-region-crosswalk}
+# Use the 2025 SUS health-region definition.
+# This analysis is performed at health-region level because annual deaths
+# are too sparse for stable municipality-level joint modeling.
+
+health_regions_sf <- read_health_region(year = 2025, showProgress = FALSE) %>%
+  st_make_valid()
+
+muni_to_health_region <- health_regions_sf %>%
+  st_drop_geometry() %>%
+  distinct(code_muni, code_health_region) %>%
+  mutate(
+    code_muni = str_pad(
+      substr(as.character(code_muni), 1, 6),
+      6,
+      pad = "0"
+    )
+  )
+
+health_region_graph_sf <- health_regions_sf %>%
+  group_by(code_health_region) %>%
+  summarise(.groups = "drop") %>%
+  st_make_valid()
+
+nb_hr <- poly2nb(health_region_graph_sf)
+
+adj_file_hr <- file.path(
+  results_dir,
+  "health_region_graph_2025.adj"
+)
+
+nb2INLA(file = adj_file_hr, nb = nb_hr)
+
+stopifnot(file.exists(adj_file_hr))
+
+g_hr <- INLA::inla.read.graph(adj_file_hr)
+hr_levels <- health_region_graph_sf$code_health_region
+
+cat("Municipalities mapped:", nrow(muni_to_health_region), "\n")
+cat("Health regions:", length(hr_levels), "\n")
+cat("Adjacency graph nodes:", g_hr$n, "\n")
+
+stopifnot(g_hr$n == length(hr_levels))
+```
+
+## Build health-region by year panel
+
+```{r hr-panel}
+chik_hr_base <- Chik_total %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(DT_SIN_PRI)
+  ) %>%
+  mutate(
+    year      = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
+    code_muni = str_pad(
+      substr(as.character(ID_MUNICIP), 1, 6),
+      6,
+      pad = "0"
+    ),
+    is_death  = EVOLUCAO == 2
+  ) %>%
+  left_join(
+    muni_to_health_region,
+    by = "code_muni"
+  ) %>%
+  filter(!is.na(code_health_region))
+
+cases_by_hr_year <- chik_hr_base %>%
+  count(
+    code_health_region,
+    year,
+    name = "cases"
+  )
+
+deaths_by_hr_year <- chik_hr_base %>%
+  filter(is_death) %>%
+  count(
+    code_health_region,
+    year,
+    name = "deaths"
+  )
+
+pop_hr_year <- pop_panel_total %>%
+  mutate(
+    code_muni = str_pad(
+      substr(as.character(code_muni), 1, 6),
+      6,
+      pad = "0"
+    )
+  ) %>%
+  left_join(
+    muni_to_health_region,
+    by = "code_muni"
+  ) %>%
+  filter(!is.na(code_health_region)) %>%
+  group_by(
+    code_health_region,
+    year
+  ) %>%
+  summarise(
+    pop = sum(total_pop, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+hr_panel <- expand.grid(
+  code_health_region = hr_levels,
+  year = STUDY_YEARS
+) %>%
+  left_join(
+    cases_by_hr_year,
+    by = c("code_health_region", "year")
+  ) %>%
+  left_join(
+    deaths_by_hr_year,
+    by = c("code_health_region", "year")
+  ) %>%
+  left_join(
+    pop_hr_year,
+    by = c("code_health_region", "year")
+  ) %>%
+  mutate(
+    cases  = replace_na(cases, 0),
+    deaths = replace_na(deaths, 0)
+  ) %>%
+  filter(
+    !is.na(pop),
+    pop > 0
+  )
+
+cat(
+  "Health-region-years in panel:",
+  nrow(hr_panel),
+  "\n"
+)
+
+stopifnot(
+  all(hr_panel$year %in% STUDY_YEARS)
+)
+
+summary(hr_panel$cases)
+summary(hr_panel$deaths)
+```
+
+## Shared-component model function
+
+```{r shared-component-function}
+fit_shared_component_year <- function(
+  year_to_fit,
+  panel = hr_panel,
+  graph = g_hr,
+  levels = hr_levels
+) {
+
+  yr_data <- panel %>%
+    filter(year == year_to_fit) %>%
+    mutate(
+      space_id = match(
+        code_health_region,
+        levels
+      )
+    ) %>%
+    filter(!is.na(space_id))
+
+  nat_case_rate <- sum(
+    yr_data$cases,
+    na.rm = TRUE
+  ) / sum(
+    yr_data$pop,
+    na.rm = TRUE
+  )
+
+  nat_death_rate <- sum(
+    yr_data$deaths,
+    na.rm = TRUE
+  ) / sum(
+    yr_data$pop,
+    na.rm = TRUE
+  )
+
+  long_df <- bind_rows(
+    yr_data %>%
+      transmute(
+        y = cases,
+        E = pop * nat_case_rate,
+        outcome = "case",
+        alpha_case = 1,
+        alpha_death = 0,
+        id_shared_case = space_id,
+        id_shared_death = NA_integer_,
+        id_case_specific = space_id,
+        id_death_specific = NA_integer_
+      ),
+
+    yr_data %>%
+      transmute(
+        y = deaths,
+        E = pop * nat_death_rate,
+        outcome = "death",
+        alpha_case = 0,
+        alpha_death = 1,
+        id_shared_case = NA_integer_,
+        id_shared_death = space_id,
+        id_case_specific = NA_integer_,
+        id_death_specific = space_id
+      )
+  )
+
+  formula_shared <- y ~ 0 +
+    alpha_case +
+    alpha_death +
+
+    f(
+      id_shared_case,
+      model = "bym2",
+      graph = graph,
+      scale.model = TRUE,
+      hyper = list(
+        prec = list(
+          prior = "pc.prec",
+          param = c(1, 0.01)
+        ),
+        phi = list(
+          prior = "pc",
+          param = c(0.5, 2/3)
+        )
+      )
+    ) +
+
+    f(
+      id_shared_death,
+      copy = "id_shared_case",
+      fixed = FALSE,
+      hyper = list(
+        beta = list(
+          prior = "normal",
+          param = c(0, 5)
+        )
+      )
+    ) +
+
+    f(
+      id_case_specific,
+      model = "bym2",
+      graph = graph,
+      scale.model = TRUE,
+      hyper = list(
+        prec = list(
+          prior = "pc.prec",
+          param = c(1, 0.01)
+        ),
+        phi = list(
+          prior = "pc",
+          param = c(0.5, 2/3)
+        )
+      )
+    ) +
+
+    f(
+      id_death_specific,
+      model = "bym2",
+      graph = graph,
+      scale.model = TRUE,
+      hyper = list(
+        prec = list(
+          prior = "pc.prec",
+          param = c(1, 0.01)
+        ),
+        phi = list(
+          prior = "pc",
+          param = c(0.5, 2/3)
+        )
+      )
+    )
+
+  fit <- inla(
+    formula_shared,
+    family = "poisson",
+    data = long_df,
+    E = long_df$E,
+    control.predictor = list(
+      compute = TRUE,
+      link = 1
+    ),
+    control.compute = list(
+      dic = TRUE,
+      waic = TRUE,
+      config = TRUE
+    ),
+    control.inla = list(
+      strategy = "simplified.laplace"
+    ),
+    num.threads = "1:1",
+    verbose = TRUE
+  )
+
+  fit
+}
+```
+
+## Load existing yearly fits and fit only missing years
+
+```{r shared-component-all-years}
+years_to_fit <- STUDY_YEARS
+
+shared_fits <- list()
+shared_fit_failures <- character(0)
+years_missing <- integer(0)
+
+# ------------------------------------------------------------
+# 1. Load all completed yearly fits
+# ------------------------------------------------------------
+
+for (yr in years_to_fit) {
+
+  fit_file <- file.path(
+    results_dir,
+    paste0("fit_shared_", yr, ".rds")
+  )
+
+  if (file.exists(fit_file)) {
+
+    cat(
+      "Loading existing fit:",
+      yr,
+      "from",
+      fit_file,
+      "\n"
+    )
+
+    loaded_fit <- tryCatch(
+      readRDS(fit_file),
+      error = function(e) {
+        cat(
+          "WARNING: could not read saved fit for",
+          yr,
+          ":",
+          conditionMessage(e),
+          "\n"
+        )
+        NULL
+      }
+    )
+
+    if (!is.null(loaded_fit)) {
+      shared_fits[[as.character(yr)]] <- loaded_fit
+    } else {
+      years_missing <- c(
+        years_missing,
+        yr
+      )
+    }
+
+  } else {
+
+    years_missing <- c(
+      years_missing,
+      yr
+    )
+  }
+}
+
+cat(
+  "\nAlready available:",
+  if (length(shared_fits)) {
+    paste(names(shared_fits), collapse = ", ")
+  } else {
+    "none"
+  },
+  "\n"
+)
+
+cat(
+  "Years still needing a fit:",
+  if (length(years_missing)) {
+    paste(years_missing, collapse = ", ")
+  } else {
+    "none"
+  },
+  "\n"
+)
+
+# ------------------------------------------------------------
+# 2. Fit only missing or unreadable years
+# ------------------------------------------------------------
+
+for (yr in years_missing) {
+
+  cat(
+    "\n==================== Fitting year",
+    yr,
+    "====================\n"
+  )
+
+  fit_result <- tryCatch(
+    fit_shared_component_year(yr),
+    error = function(e) {
+      cat(
+        "FAILED for year",
+        yr,
+        ":",
+        conditionMessage(e),
+        "\n"
+      )
+      NULL
+    }
+  )
+
+  if (is.null(fit_result)) {
+    shared_fit_failures <- c(
+      shared_fit_failures,
+      as.character(yr)
+    )
+    next
+  }
+
+  fit_file <- file.path(
+    results_dir,
+    paste0("fit_shared_", yr, ".rds")
+  )
+
+  save_ok <- tryCatch(
+    {
+      saveRDS(
+        fit_result,
+        fit_file
+      )
+      TRUE
+    },
+    error = function(e) {
+      cat(
+        "WARNING: could not save fit_shared_",
+        yr,
+        ".rds (",
+        conditionMessage(e),
+        "). Fit remains in memory.\n",
+        sep = ""
+      )
+      FALSE
+    }
+  )
+
+  if (save_ok) {
+    cat(
+      "Saved:",
+      fit_file,
+      "\n"
+    )
+  }
+
+  shared_fits[[as.character(yr)]] <- fit_result
+}
+
+# Chronological ordering
+shared_fits <- shared_fits[
+  intersect(
+    as.character(years_to_fit),
+    names(shared_fits)
+  )
+]
+
+cat("\n=== Shared-component fit summary ===\n")
+
+cat(
+  "Years available:",
+  if (length(shared_fits)) {
+    paste(names(shared_fits), collapse = ", ")
+  } else {
+    "none"
+  },
+  "\n"
+)
+
+if (length(shared_fit_failures) > 0) {
+  cat(
+    "Years that failed during this run:",
+    paste(shared_fit_failures, collapse = ", "),
+    "\n"
+  )
+}
+
+missing_after_run <- setdiff(
+  as.character(years_to_fit),
+  names(shared_fits)
+)
+
+cat(
+  "Years unavailable after this run:",
+  if (length(missing_after_run)) {
+    paste(missing_after_run, collapse = ", ")
+  } else {
+    "none"
+  },
+  "\n"
+)
+
+stopifnot(
+  all(as.character(STUDY_YEARS) %in% names(shared_fits))
+)
+```
+
+## Shared spatial loading over time
+
+```{r concordance-time-series}
+concordance_df <- map_dfr(
+  names(shared_fits),
+  function(yr) {
+
+    fit <- shared_fits[[yr]]
+
+    beta_row <- fit$summary.hyperpar[
+      grepl(
+        "^Beta for",
+        rownames(fit$summary.hyperpar)
+      ),
+      ,
+      drop = FALSE
+    ]
+
+    if (nrow(beta_row) != 1) {
+
+      warning(
+        "Year ",
+        yr,
+        ": expected exactly one Beta row, found ",
+        nrow(beta_row)
+      )
+
+      return(
+        tibble(
+          year = as.integer(yr),
+          beta_mean = NA_real_,
+          beta_lower = NA_real_,
+          beta_upper = NA_real_
+        )
+      )
+    }
+
+    tibble(
+      year = as.integer(yr),
+      beta_mean = beta_row[1, "mean"],
+      beta_lower = beta_row[1, "0.025quant"],
+      beta_upper = beta_row[1, "0.975quant"]
+    )
+  }
+)
+
+concordance_df <- tibble(
+  year = STUDY_YEARS
+) %>%
+  left_join(
+    concordance_df,
+    by = "year"
+  ) %>%
+  arrange(year) %>%
+  mutate(
+    ci_width = beta_upper - beta_lower,
+    ci_includes_1 = beta_lower <= 1 & beta_upper >= 1
+  )
+
+print(concordance_df)
+
+readr::write_csv(
+  concordance_df,
+  file.path(
+    results_dir,
+    "shared_component_concordance_2016_2025.csv"
+  )
+)
+```
+
+## Concordance figure
+
+```{r concordance-figure}
+p_beta <- ggplot(
+  concordance_df,
+  aes(
+    x = year,
+    y = beta_mean
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = beta_lower,
+      ymax = beta_upper
+    ),
+    alpha = 0.2,
+    fill = "#2c7fb8"
+  ) +
+  geom_line(
+    color = "#2c7fb8",
+    linewidth = 1
+  ) +
+  geom_point(
+    size = 2,
+    color = "#2c7fb8"
+  ) +
+  geom_hline(
+    yintercept = 1,
+    linetype = "dashed",
+    color = "grey40"
+  ) +
+  scale_x_continuous(
+    breaks = STUDY_YEARS
+  ) +
+  labs(
+    title = "Shared spatial loading of mortality relative to cases",
+    subtitle = "Beta = 1 indicates equal loading on the shared spatial field",
+    x = "Year",
+    y = "Beta"
+  ) +
+  theme_minimal(base_size = 12)
+
+p_beta
+```
+
+## Extract 2024 and 2025 outcome-specific spatial fields
+
+```{r extract-outcome-specific-fields}
+extract_bym2_field <- function(
+  fit_obj,
+  term_name,
+  levels = hr_levels
+) {
+
+  fit_obj$summary.random[[term_name]] %>%
+    transmute(
+      space_id = ID,
+      effect_mean = mean
+    ) %>%
+    filter(
+      space_id <= length(levels)
+    ) %>%
+    mutate(
+      code_health_region = levels[space_id]
+    )
+}
+
+fit_shared_2024 <- shared_fits[["2024"]]
+fit_shared_2025 <- shared_fits[["2025"]]
+
+stopifnot(
+  !is.null(fit_shared_2024),
+  !is.null(fit_shared_2025)
+)
+
+case_specific_2024 <- extract_bym2_field(
+  fit_shared_2024,
+  "id_case_specific"
+)
+
+death_specific_2024 <- extract_bym2_field(
+  fit_shared_2024,
+  "id_death_specific"
+)
+
+case_specific_2025 <- extract_bym2_field(
+  fit_shared_2025,
+  "id_case_specific"
+)
+
+death_specific_2025 <- extract_bym2_field(
+  fit_shared_2025,
+  "id_death_specific"
+)
+
+cat("Rows per field:\n")
+cat(
+  "2024 case:",
+  nrow(case_specific_2024),
+  "\n"
+)
+cat(
+  "2024 death:",
+  nrow(death_specific_2024),
+  "\n"
+)
+cat(
+  "2025 case:",
+  nrow(case_specific_2025),
+  "\n"
+)
+cat(
+  "2025 death:",
+  nrow(death_specific_2025),
+  "\n"
+)
+```
+
+## Outcome-specific spatial maps
+
+```{r outcome-specific-maps}
+build_outcome_map <- function(
+  field_df,
+  title,
+  limits
+) {
+
+  map_data <- health_region_graph_sf %>%
+    left_join(
+      field_df,
+      by = "code_health_region"
+    )
+
+  ggplot(map_data) +
+    geom_sf(
+      aes(fill = effect_mean),
+      color = NA
+    ) +
+    scale_fill_gradient2(
+      low = "#0033FF",
+      mid = "white",
+      high = "#FF0000",
+      midpoint = 0,
+      limits = limits,
+      oob = scales::squish,
+      name = "Outcome-specific\nspatial effect"
+    ) +
+    labs(
+      title = title
+    ) +
+    theme_void()
+}
+
+# Use one common scale across all four maps so visual intensity is comparable.
+all_field_values <- c(
+  case_specific_2024$effect_mean,
+  death_specific_2024$effect_mean,
+  case_specific_2025$effect_mean,
+  death_specific_2025$effect_mean
+)
+
+max_abs_effect <- max(
+  abs(all_field_values),
+  na.rm = TRUE
+)
+
+shared_limits <- c(
+  -max_abs_effect,
+  max_abs_effect
+)
+
+p_case_2024 <- build_outcome_map(
+  case_specific_2024,
+  "Case-specific field, 2024",
+  shared_limits
+)
+
+p_death_2024 <- build_outcome_map(
+  death_specific_2024,
+  "Death-specific field, 2024",
+  shared_limits
+)
+
+p_case_2025 <- build_outcome_map(
+  case_specific_2025,
+  "Case-specific field, 2025",
+  shared_limits
+)
+
+p_death_2025 <- build_outcome_map(
+  death_specific_2025,
+  "Death-specific field, 2025",
+  shared_limits
+)
+
+(p_case_2024 | p_death_2024) /
+  (p_case_2025 | p_death_2025)
+```
+
+## Summary of strongest outcome-specific spatial signals
+
+```{r field-summary}
+hr_names <- health_regions_sf %>%
+  st_drop_geometry() %>%
+  distinct(
+    code_health_region,
+    name_health_region,
+    code_state
+  )
+
+
+
+summarize_field <- function(
+  field_df,
+  year_label,
+  outcome_label,
+  n = 15
+) {
+
+  cat(
+    "\n===",
+    year_label,
+    ": strongest",
+    outcome_label,
+    "signals ===\n"
+  )
+
+  top_regions <- field_df %>%
+    left_join(
+      hr_names,
+      by = "code_health_region"
+    ) %>%
+    arrange(desc(effect_mean)) %>%
+    select(
+      code_health_region,
+      name_health_region,
+      code_state,
+      effect_mean
+    ) %>%
+    slice_head(n = n)
+
+  print(top_regions)
+
+  cat(
+    "\nRange:",
+    paste(
+      round(
+        range(
+          field_df$effect_mean,
+          na.rm = TRUE
+        ),
+        3
+      ),
+      collapse = " to "
+    ),
+    "\n"
+  )
+}
+
+
+summarize_field(
+  case_specific_2024,
+  2024,
+  "case-specific"
+)
+
+summarize_field(
+  death_specific_2024,
+  2024,
+  "death-specific"
+)
+
+summarize_field(
+  case_specific_2025,
+  2025,
+  "case-specific"
+)
+
+summarize_field(
+  death_specific_2025,
+  2025,
+  "death-specific"
+)
+
+
+```
+
+## Save compact outcome-specific field tables
+
+```{r save-field-tables}
+readr::write_csv(
+  case_specific_2024,
+  file.path(
+    results_dir,
+    "shared_component_case_specific_2024.csv"
+  )
+)
+
+readr::write_csv(
+  death_specific_2024,
+  file.path(
+    results_dir,
+    "shared_component_death_specific_2024.csv"
+  )
+)
+
+readr::write_csv(
+  case_specific_2025,
+  file.path(
+    results_dir,
+    "shared_component_case_specific_2025.csv"
+  )
+)
+
+readr::write_csv(
+  death_specific_2025,
+  file.path(
+    results_dir,
+    "shared_component_death_specific_2025.csv"
+  )
+)
+
+cat(
+  "Saved concordance and outcome-specific field outputs to:",
+  results_dir,
+  "\n"
+)
+```
+
+
+Figure 4
+```{r}
+
+states_sf_plot <- geobr::read_state(
+  year = 2020,
+  showProgress = FALSE
+)
+
+p_case_2025 <- p_case_2025 +
+  geom_sf(
+    data = states_sf_plot,
+    fill = NA,
+    color = "grey55",
+    linewidth = 0.18,
+    inherit.aes = FALSE
+  )
+
+p_death_2025 <- p_death_2025 +
+  geom_sf(
+    data = states_sf_plot,
+    fill = NA,
+    color = "grey55",
+    linewidth = 0.18,
+    inherit.aes = FALSE
+  )
+
+figure4 <- p_beta /
+  (p_case_2025 | p_death_2025) +
+  plot_layout(
+    heights = c(0.72, 1)
+  ) +
+  plot_annotation(
+    tag_levels = "A"
+  ) &
+  theme(
+    plot.tag = element_text(
+      face = "bold",
+      size = 13
+    )
+  )
+
+figure4
+
+field_dispersion <- bind_rows(
+  case_specific_2025 %>%
+    st_drop_geometry() %>%
+    summarise(
+      outcome = "Case-specific",
+      mean_abs = mean(abs(effect_mean), na.rm = TRUE),
+      sd = sd(effect_mean, na.rm = TRUE),
+      q25 = quantile(effect_mean, 0.25, na.rm = TRUE),
+      median = median(effect_mean, na.rm = TRUE),
+      q75 = quantile(effect_mean, 0.75, na.rm = TRUE),
+      iqr = IQR(effect_mean, na.rm = TRUE),
+      min = min(effect_mean, na.rm = TRUE),
+      max = max(effect_mean, na.rm = TRUE)
+    ),
+  
+  death_specific_2025 %>%
+    st_drop_geometry() %>%
+    summarise(
+      outcome = "Death-specific",
+      mean_abs = mean(abs(effect_mean), na.rm = TRUE),
+      sd = sd(effect_mean, na.rm = TRUE),
+      q25 = quantile(effect_mean, 0.25, na.rm = TRUE),
+      median = median(effect_mean, na.rm = TRUE),
+      q75 = quantile(effect_mean, 0.75, na.rm = TRUE),
+      iqr = IQR(effect_mean, na.rm = TRUE),
+      min = min(effect_mean, na.rm = TRUE),
+      max = max(effect_mean, na.rm = TRUE)
+    )
+)
+
+field_dispersion
+
+
+```
+

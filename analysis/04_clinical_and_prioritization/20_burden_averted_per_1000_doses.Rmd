@@ -1,0 +1,1589 @@
+---
+title: "20 - Illustrative Outcomes Averted per 1,000 Doses Sensitivity"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+This analysis addresses the revision-plan request for an **illustrative outcomes-averted-per-dose
+sensitivity analysis**.
+
+It compares the same municipality prioritization rules already used in File 13:
+
+1. transmission-only;
+2. age/severity-only;
+3. expected-burden.
+
+All rules select the same top one-third of Brazil's 5,570 municipalities (`n = 1,857`).
+
+The calculation is restricted to the **18-59-year population**, matching the current Brazilian
+age window used elsewhere in the revision. It uses the primary model's fitted 2024-2025
+municipality-month incidence surface together with the same age-specific observed CFR weights
+used in File 13.
+
+This is **not a vaccine impact evaluation**. It is a transparent scenario calculation under
+assumed direct vaccine efficacy and coverage. It does not model indirect protection, transmission
+feedback, waning, implementation constraints, or causal vaccine effectiveness.
+
+A useful mathematical consequence is made explicit: under this linear direct-protection model,
+coverage changes the **total number of outcomes averted**, but not the expected number averted
+per 1,000 administered doses. The code verifies this rather than hiding it.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(ggplot2)
+  library(scales)
+  library(purrr)
+})
+
+EXPECTED_N_MUNI <- 5570L
+TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
+
+STUDY_YEARS <- 2024:2025
+
+# Illustrative scenario values from the revision-plan logic.
+# These are assumptions, not empirical VE or coverage estimates.
+EFFICACY_GRID <- c(0.50, 0.70, 0.90)
+COVERAGE_GRID <- c(0.25, 0.50, 0.75)
+
+# Equal-dose national supply scenarios used for the head-to-head comparison.
+# Each value is the fraction of the national 18-59 eligible population for
+# which one dose is available. Every prioritization rule receives exactly
+# the same dose budget in a given scenario.
+DOSE_BUDGET_FRAC_GRID <- c(0.25, 0.50, 0.75)
+
+# Monte Carlo draws for uncertainty in the observed age-specific CFR weights.
+# Jeffreys beta posterior is used only as a sensitivity device.
+N_DRAWS <- 2000L
+SEED <- 20261003L
+
+RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+OUT_DIR <- file.path(RESULT_ROOT, "averted_burden_sensitivity")
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+ST_RATE_PATH <- file.path(
+  RESULT_ROOT,
+  "st_rate_chik_region_2016_2025.rds"
+)
+
+PRIORITY_PATH <- file.path(
+  RESULT_ROOT,
+  "priority_rule_evaluation_municipality_2024_2025.csv"
+)
+
+POP_AGE_PATH <- path.expand("~/pop_panel_age.rds")
+
+required_files <- c(
+  ST_RATE_PATH,
+  PRIORITY_PATH,
+  POP_AGE_PATH
+)
+
+missing_files <- required_files[!file.exists(required_files)]
+
+if (length(missing_files) > 0L) {
+  stop(
+    "Required saved inputs are missing:\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+if (!exists("Chik_total")) {
+  stop(
+    "Chik_total is not currently in memory. Run 01_data_import_cleaning.Rmd once in this ",
+    "R session, then rerun File 20. No INLA refit is required."
+  )
+}
+
+cat("Municipalities:", EXPECTED_N_MUNI, "\n")
+cat("Matched top-third:", TOP_N, "\n")
+cat("Efficacy scenarios:", paste(EFFICACY_GRID, collapse = ", "), "\n")
+cat("Coverage scenarios:", paste(COVERAGE_GRID, collapse = ", "), "\n")
+```
+
+# 1. Load saved model and priority outputs
+
+```{r load-inputs}
+st_rate <- readRDS(ST_RATE_PATH) %>%
+  mutate(
+    ym_date = as.Date(ym_date),
+    year = lubridate::year(ym_date),
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  ) %>%
+  filter(year %in% STUDY_YEARS)
+
+priority <- readr::read_csv(
+  PRIORITY_PATH,
+  show_col_types = FALSE,
+  col_types = cols(
+    code_muni = col_character(),
+    .default = col_guess()
+  )
+) %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  )
+
+pop_panel_age <- readRDS(POP_AGE_PATH) %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    year = as.integer(year)
+  )
+
+required_priority_cols <- c(
+  "code_muni", "T_irr", "V_burden", "combined_burden"
+)
+
+stopifnot(
+  all(required_priority_cols %in% names(priority)),
+  nrow(priority) == EXPECTED_N_MUNI,
+  dplyr::n_distinct(priority$code_muni) == EXPECTED_N_MUNI,
+  all(c("code_muni", "ym_date", "year", "rate_per_person") %in% names(st_rate)),
+  dplyr::n_distinct(st_rate$code_muni) == EXPECTED_N_MUNI
+)
+
+cat("2024-2025 fitted-rate rows:", nrow(st_rate), "\n")
+```
+
+# 2. Recreate the age-specific fatality weights used in File 13
+
+Six age bands are reconstructed exactly as in File 13. The dose-averted calculation itself uses
+only the licensed 18-59 age window (`18-39` and `40-59`).
+
+```{r cfr-weights}
+decode_age_years <- function(x) {
+  x <- suppressWarnings(as.numeric(as.character(x)))
+  unit_code <- floor(x / 1000)
+  value <- x %% 1000
+
+  dplyr::case_when(
+    unit_code == 1 ~ value / (24 * 365),
+    unit_code == 2 ~ value / 365,
+    unit_code == 3 ~ value / 12,
+    unit_code == 4 ~ value,
+    TRUE ~ NA_real_
+  )
+}
+
+chik_severity <- Chik_total %>%
+  mutate(
+    year = lubridate::year(as.Date(DT_SIN_PRI)),
+    age_years = decode_age_years(NU_IDADE_N),
+    age_band = case_when(
+      !is.na(age_years) & age_years < 18 ~ "0-17",
+      age_years >= 18 & age_years < 40 ~ "18-39",
+      age_years >= 40 & age_years < 60 ~ "40-59",
+      age_years >= 60 & age_years < 70 ~ "60-69",
+      age_years >= 70 & age_years < 80 ~ "70-79",
+      age_years >= 80 ~ "80+",
+      TRUE ~ NA_character_
+    ),
+    death = as.integer(as.character(EVOLUCAO) == "2")
+  ) %>%
+  filter(
+    year %in% 2016:2025,
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(age_band)
+  )
+
+cfr_weights <- chik_severity %>%
+  group_by(age_band) %>%
+  summarise(
+    cases = n(),
+    deaths = sum(death, na.rm = TRUE),
+    CFR = deaths / cases,
+    .groups = "drop"
+  )
+
+print(cfr_weights)
+
+eligible_cfr <- cfr_weights %>%
+  filter(age_band %in% c("18-39", "40-59"))
+
+stopifnot(
+  nrow(eligible_cfr) == 2L,
+  all(eligible_cfr$cases > 0L),
+  all(eligible_cfr$deaths >= 0L)
+)
+```
+
+# 3. Build municipality-year eligible population
+
+```{r eligible-population}
+eligible_pop_year <- pop_panel_age %>%
+  filter(
+    year %in% STUDY_YEARS,
+    age >= 18,
+    age < 60
+  ) %>%
+  mutate(
+    age_band = case_when(
+      age >= 18 & age < 40 ~ "18-39",
+      age >= 40 & age < 60 ~ "40-59",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(age_band)) %>%
+  group_by(code_muni, year, age_band) %>%
+  summarise(
+    pop = sum(pop, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+eligible_pop_mean <- eligible_pop_year %>%
+  group_by(code_muni, year) %>%
+  summarise(
+    eligible_pop_year = sum(pop),
+    .groups = "drop"
+  ) %>%
+  group_by(code_muni) %>%
+  summarise(
+    eligible_pop = mean(eligible_pop_year),
+    .groups = "drop"
+  )
+
+stopifnot(
+  nrow(eligible_pop_mean) == EXPECTED_N_MUNI,
+  all(is.finite(eligible_pop_mean$eligible_pop)),
+  all(eligible_pop_mean$eligible_pop > 0)
+)
+```
+
+# 4. Absolute fitted 2024-2025 burden in the eligible age window
+
+The primary INLA output already contains an absolute fitted municipality-month incidence
+(`rate_per_person = fitted cases / municipality population`).
+
+For each municipality-month, age-specific expected cases are approximated by applying that
+municipality's fitted incidence to the corresponding age-specific population. This assumes the
+within-municipality infection incidence is proportional across eligible age bands.
+
+Expected deaths are then obtained by applying the observed age-specific CFR weights.
+
+```{r expected-eligible-burden}
+eligible_monthly <- st_rate %>%
+  select(
+    code_muni,
+    ym_date,
+    year,
+    rate_per_person
+  ) %>%
+  left_join(
+    eligible_pop_year,
+    by = c("code_muni", "year"),
+    relationship = "many-to-many"
+  ) %>%
+  left_join(
+    eligible_cfr %>%
+      select(age_band, CFR),
+    by = "age_band"
+  ) %>%
+  mutate(
+    expected_cases_age = rate_per_person * pop,
+    expected_deaths_age = expected_cases_age * CFR
+  )
+
+stopifnot(
+  !anyNA(eligible_monthly$pop),
+  !anyNA(eligible_monthly$CFR),
+  all(is.finite(eligible_monthly$expected_cases_age)),
+  all(is.finite(eligible_monthly$expected_deaths_age))
+)
+
+eligible_burden_muni <- eligible_monthly %>%
+  group_by(code_muni) %>%
+  summarise(
+    expected_cases_eligible_2425 =
+      sum(expected_cases_age, na.rm = TRUE),
+    expected_deaths_eligible_2425 =
+      sum(expected_deaths_age, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    eligible_pop_mean,
+    by = "code_muni"
+  )
+
+stopifnot(
+  nrow(eligible_burden_muni) == EXPECTED_N_MUNI,
+  all(is.finite(eligible_burden_muni$expected_cases_eligible_2425)),
+  all(is.finite(eligible_burden_muni$expected_deaths_eligible_2425))
+)
+
+cat(
+  "Model-implied eligible-age cases, 2024-2025:",
+  sum(eligible_burden_muni$expected_cases_eligible_2425), "\n"
+)
+
+cat(
+  "Model-implied eligible-age deaths, 2024-2025:",
+  sum(eligible_burden_muni$expected_deaths_eligible_2425), "\n"
+)
+```
+
+# 5. Define matched-coverage prioritization rules
+
+```{r ranking-rules}
+rule_specs <- tibble::tribble(
+  ~rule, ~score_col,
+  "Transmission-only", "T_irr",
+  "Age/severity-only", "V_burden",
+  "Expected-burden", "combined_burden"
+)
+
+analysis_muni <- priority %>%
+  select(
+    code_muni,
+    T_irr,
+    V_burden,
+    combined_burden
+  ) %>%
+  left_join(
+    eligible_burden_muni,
+    by = "code_muni"
+  )
+
+select_rule <- function(dat, score_col, rule_name) {
+  dat %>%
+    arrange(
+      desc(.data[[score_col]]),
+      code_muni
+    ) %>%
+    slice_head(n = TOP_N) %>%
+    mutate(rule = rule_name)
+}
+
+selected_by_rule <- purrr::map2_dfr(
+  rule_specs$score_col,
+  rule_specs$rule,
+  ~ select_rule(analysis_muni, .x, .y)
+)
+
+stopifnot(
+  all(
+    selected_by_rule %>%
+      count(rule) %>%
+      pull(n) == TOP_N
+  )
+)
+```
+
+# 6. Deterministic efficacy × coverage scenario grid
+
+For each selected municipality set:
+
+- `doses = coverage × eligible population`;
+- `cases averted = efficacy × coverage × expected eligible-age cases`;
+- `deaths averted = efficacy × coverage × expected eligible-age deaths`.
+
+This is a deliberately simple direct-protection calculation.
+
+```{r deterministic-grid}
+rule_burden <- selected_by_rule %>%
+  group_by(rule) %>%
+  summarise(
+    selected_eligible_pop =
+      sum(eligible_pop, na.rm = TRUE),
+    expected_cases_eligible_2425 =
+      sum(expected_cases_eligible_2425, na.rm = TRUE),
+    expected_deaths_eligible_2425 =
+      sum(expected_deaths_eligible_2425, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+scenario_grid <- tidyr::crossing(
+  efficacy = EFFICACY_GRID,
+  coverage = COVERAGE_GRID
+)
+
+averted_scenarios <- tidyr::crossing(
+  rule = rule_burden$rule,
+  efficacy = EFFICACY_GRID,
+  coverage = COVERAGE_GRID
+) %>%
+  left_join(
+    rule_burden,
+    by = "rule"
+  ) %>%
+  mutate(
+    doses_administered =
+      coverage * selected_eligible_pop,
+
+    expected_cases_averted =
+      efficacy * coverage *
+      expected_cases_eligible_2425,
+
+    expected_deaths_averted =
+      efficacy * coverage *
+      expected_deaths_eligible_2425,
+
+    cases_averted_per_1000_doses =
+      1000 * expected_cases_averted /
+      doses_administered,
+
+    deaths_averted_per_1000_doses =
+      1000 * expected_deaths_averted /
+      doses_administered
+  )
+
+print(averted_scenarios)
+```
+
+
+# 6A. Equal-dose national supply comparison
+
+The coverage-based calculation above applies the same percentage coverage within each
+rule's selected municipalities. Because the selected eligible populations differ by rule,
+that design does **not** hold the number of administered doses fixed.
+
+Reviewer 2's "outcomes averted per dose" question is therefore also evaluated under an
+equal-dose constraint. In each national supply scenario, every prioritization rule receives
+the same total dose budget. Municipalities are traversed from highest to lowest priority
+score, with full coverage within each municipality until the remaining budget is smaller
+than the next municipality's eligible population; the boundary municipality then receives
+partial coverage. This is an illustrative greedy allocation, not an operational optimization
+that incorporates delivery costs, uptake, contraindications, or dose wastage.
+
+```{r fixed-dose-budget-allocation}
+national_eligible_pop <- sum(
+  analysis_muni$eligible_pop,
+  na.rm = TRUE
+)
+
+dose_budget_grid <- tibble::tibble(
+  dose_budget_fraction = DOSE_BUDGET_FRAC_GRID,
+  dose_budget = national_eligible_pop *
+    DOSE_BUDGET_FRAC_GRID
+)
+
+allocate_fixed_doses <- function(
+  dat,
+  score_col,
+  rule_name,
+  dose_budget
+) {
+
+  ranked <- dat %>%
+    arrange(
+      desc(.data[[score_col]]),
+      code_muni
+    ) %>%
+    mutate(
+      cumulative_eligible_pop =
+        cumsum(eligible_pop),
+      cumulative_eligible_pop_before =
+        cumulative_eligible_pop -
+        eligible_pop,
+      allocated_doses =
+        pmax(
+          0,
+          pmin(
+            eligible_pop,
+            dose_budget -
+              cumulative_eligible_pop_before
+          )
+        ),
+      allocated_coverage =
+        dplyr::if_else(
+          eligible_pop > 0,
+          allocated_doses / eligible_pop,
+          0
+        )
+    ) %>%
+    filter(allocated_doses > 0) %>%
+    mutate(
+      rule = rule_name,
+      dose_budget = dose_budget
+    )
+
+  allocated_total <- sum(
+    ranked$allocated_doses,
+    na.rm = TRUE
+  )
+
+  stopifnot(
+    isTRUE(
+      all.equal(
+        allocated_total,
+        min(
+          dose_budget,
+          national_eligible_pop
+        ),
+        tolerance = 1e-6
+      )
+    )
+  )
+
+  ranked
+}
+
+fixed_dose_allocations <- purrr::pmap_dfr(
+  tidyr::crossing(
+    rule = rule_specs$rule,
+    dose_budget_fraction =
+      DOSE_BUDGET_FRAC_GRID
+  ) %>%
+    left_join(
+      rule_specs,
+      by = "rule"
+    ) %>%
+    mutate(
+      dose_budget =
+        national_eligible_pop *
+        dose_budget_fraction
+    ),
+  function(
+    rule,
+    dose_budget_fraction,
+    score_col,
+    dose_budget
+  ) {
+    allocate_fixed_doses(
+      dat = analysis_muni,
+      score_col = score_col,
+      rule_name = rule,
+      dose_budget = dose_budget
+    ) %>%
+      mutate(
+        dose_budget_fraction =
+          dose_budget_fraction
+      )
+  }
+)
+
+fixed_dose_rule_totals <-
+  fixed_dose_allocations %>%
+  group_by(
+    rule,
+    dose_budget_fraction,
+    dose_budget
+  ) %>%
+  summarise(
+    doses_administered =
+      sum(allocated_doses),
+    municipalities_reached =
+      n(),
+    fully_covered_municipalities =
+      sum(
+        allocated_coverage >=
+          1 - 1e-12
+      ),
+    boundary_coverage =
+      min(
+        allocated_coverage,
+        na.rm = TRUE
+      ),
+    expected_cases_exposed =
+      sum(
+        allocated_coverage *
+          expected_cases_eligible_2425,
+        na.rm = TRUE
+      ),
+    expected_deaths_exposed =
+      sum(
+        allocated_coverage *
+          expected_deaths_eligible_2425,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  )
+
+print(fixed_dose_rule_totals)
+```
+
+# 6B. Equal-dose efficacy scenarios
+
+Because the total number of administered doses is identical across rules within each
+dose-budget scenario, differences in outcomes averted are directly attributable to where
+the doses are allocated under the model assumptions.
+
+```{r fixed-dose-efficacy-grid}
+fixed_dose_scenarios <-
+  tidyr::crossing(
+    rule = rule_specs$rule,
+    dose_budget_fraction =
+      DOSE_BUDGET_FRAC_GRID,
+    efficacy = EFFICACY_GRID
+  ) %>%
+  left_join(
+    fixed_dose_rule_totals,
+    by = c(
+      "rule",
+      "dose_budget_fraction"
+    )
+  ) %>%
+  mutate(
+    expected_cases_averted =
+      efficacy *
+      expected_cases_exposed,
+
+    expected_deaths_averted =
+      efficacy *
+      expected_deaths_exposed,
+
+    cases_averted_per_1000_doses =
+      1000 *
+      expected_cases_averted /
+      doses_administered,
+
+    deaths_averted_per_1000_doses =
+      1000 *
+      expected_deaths_averted /
+      doses_administered
+  ) %>%
+  arrange(
+    dose_budget_fraction,
+    efficacy,
+    desc(
+      deaths_averted_per_1000_doses
+    )
+  )
+
+print(fixed_dose_scenarios)
+
+fixed_dose_equal_budget_check <-
+  fixed_dose_scenarios %>%
+  group_by(
+    dose_budget_fraction,
+    efficacy
+  ) %>%
+  summarise(
+    min_doses =
+      min(doses_administered),
+    max_doses =
+      max(doses_administered),
+    dose_difference =
+      max_doses - min_doses,
+    .groups = "drop"
+  )
+
+print(fixed_dose_equal_budget_check)
+
+stopifnot(
+  max(
+    fixed_dose_equal_budget_check$
+      dose_difference
+  ) < 1e-6
+)
+```
+
+# 6C. Compact fixed-dose comparison at VE = 0.70
+
+This table is the most direct answer to the limited-supply question. It compares all three
+rules at exactly the same national dose budget.
+
+```{r fixed-dose-compact-70}
+fixed_dose_compact_70 <-
+  fixed_dose_scenarios %>%
+  filter(
+    abs(efficacy - 0.70) < 1e-12
+  ) %>%
+  select(
+    rule,
+    dose_budget_fraction,
+    doses_administered,
+    municipalities_reached,
+    fully_covered_municipalities,
+    expected_cases_averted,
+    expected_deaths_averted,
+    cases_averted_per_1000_doses,
+    deaths_averted_per_1000_doses
+  ) %>%
+  arrange(
+    dose_budget_fraction,
+    desc(
+      deaths_averted_per_1000_doses
+    )
+  )
+
+print(fixed_dose_compact_70)
+```
+
+# 6D. Save fixed-dose outputs
+
+```{r save-fixed-dose-results}
+readr::write_csv(
+  fixed_dose_rule_totals,
+  file.path(
+    OUT_DIR,
+    "fixed_dose_rule_totals.csv"
+  )
+)
+
+readr::write_csv(
+  fixed_dose_scenarios,
+  file.path(
+    OUT_DIR,
+    "fixed_dose_averted_outcomes_scenarios.csv"
+  )
+)
+
+readr::write_csv(
+  fixed_dose_compact_70,
+  file.path(
+    OUT_DIR,
+    "fixed_dose_compact_VE70.csv"
+  )
+)
+
+readr::write_csv(
+  fixed_dose_allocations %>%
+    select(
+      rule,
+      dose_budget_fraction,
+      dose_budget,
+      code_muni,
+      allocated_doses,
+      allocated_coverage,
+      expected_cases_eligible_2425,
+      expected_deaths_eligible_2425
+    ),
+  file.path(
+    OUT_DIR,
+    "fixed_dose_municipality_allocations.csv"
+  )
+)
+```
+
+
+
+# 6E. CFR uncertainty under the equal-dose design
+
+The equal-dose comparison above uses point estimates of the age-specific CFR. To match
+Reviewer 2's request for uncertainty, we repeat the fixed-dose calculation over the same
+Jeffreys-posterior CFR draws used elsewhere in this file.
+
+The ranking and the dose allocation are held fixed within each rule. Thus these intervals
+represent uncertainty in the age-specific CFR weights conditional on the fitted incidence
+surface and on the selected ranking, rather than full posterior uncertainty in the ranking
+itself.
+
+```{r fixed-dose-cfr-uncertainty}
+# Reuse the same age-specific CFR draws if they have already been created later
+# in an interactive session; otherwise create them here.
+if (!exists("cfr_draws")) {
+  set.seed(SEED)
+
+  cfr_draws <- eligible_cfr %>%
+    mutate(
+      draw = purrr::map2(
+        deaths,
+        cases,
+        ~ stats::rbeta(
+          N_DRAWS,
+          shape1 = .x + 0.5,
+          shape2 = (.y - .x) + 0.5
+        )
+      )
+    ) %>%
+    select(age_band, draw) %>%
+    tidyr::unnest_longer(
+      draw,
+      indices_to = "draw_id"
+    ) %>%
+    mutate(
+      draw_id = as.integer(draw_id)
+    )
+}
+
+if (!exists("burden_by_muni_age")) {
+  burden_by_muni_age <- eligible_monthly %>%
+    group_by(
+      code_muni,
+      age_band
+    ) %>%
+    summarise(
+      expected_cases_age_2425 =
+        sum(
+          expected_cases_age,
+          na.rm = TRUE
+        ),
+      .groups = "drop"
+    )
+}
+
+fixed_dose_age_burden <-
+  fixed_dose_allocations %>%
+  select(
+    rule,
+    dose_budget_fraction,
+    code_muni,
+    allocated_doses,
+    allocated_coverage
+  ) %>%
+  left_join(
+    burden_by_muni_age,
+    by = "code_muni",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(
+    expected_cases_age_exposed =
+      allocated_coverage *
+      expected_cases_age_2425
+  )
+
+fixed_dose_draw_deaths <-
+  fixed_dose_age_burden %>%
+  inner_join(
+    cfr_draws,
+    by = "age_band",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(
+    expected_deaths_draw =
+      expected_cases_age_exposed *
+      draw
+  ) %>%
+  group_by(
+    rule,
+    dose_budget_fraction,
+    draw_id
+  ) %>%
+  summarise(
+    expected_deaths_exposed =
+      sum(
+        expected_deaths_draw,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    fixed_dose_rule_totals %>%
+      select(
+        rule,
+        dose_budget_fraction,
+        doses_administered
+      ),
+    by = c(
+      "rule",
+      "dose_budget_fraction"
+    )
+  )
+
+fixed_dose_uncertainty <-
+  tidyr::crossing(
+    efficacy = EFFICACY_GRID
+  ) %>%
+  tidyr::crossing(
+    fixed_dose_draw_deaths
+  ) %>%
+  mutate(
+    expected_deaths_averted =
+      efficacy *
+      expected_deaths_exposed,
+
+    deaths_averted_per_1000_doses =
+      1000 *
+      expected_deaths_averted /
+      doses_administered
+  ) %>%
+  group_by(
+    rule,
+    dose_budget_fraction,
+    efficacy
+  ) %>%
+  summarise(
+    deaths_averted_median =
+      median(
+        expected_deaths_averted
+      ),
+    deaths_averted_lo =
+      quantile(
+        expected_deaths_averted,
+        0.025
+      ),
+    deaths_averted_hi =
+      quantile(
+        expected_deaths_averted,
+        0.975
+      ),
+    deaths_per_1000_median =
+      median(
+        deaths_averted_per_1000_doses
+      ),
+    deaths_per_1000_lo =
+      quantile(
+        deaths_averted_per_1000_doses,
+        0.025
+      ),
+    deaths_per_1000_hi =
+      quantile(
+        deaths_averted_per_1000_doses,
+        0.975
+      ),
+    .groups = "drop"
+  )
+
+print(
+  fixed_dose_uncertainty,
+  n = Inf
+)
+```
+
+# 6F. Fixed-dose compact table with uncertainty at VE = 0.70
+
+```{r fixed-dose-compact-70-uncertainty}
+fixed_dose_compact_70_uncertainty <-
+  fixed_dose_compact_70 %>%
+  left_join(
+    fixed_dose_uncertainty %>%
+      filter(
+        abs(efficacy - 0.70) <
+          1e-12
+      ) %>%
+      select(
+        rule,
+        dose_budget_fraction,
+        deaths_averted_median,
+        deaths_averted_lo,
+        deaths_averted_hi,
+        deaths_per_1000_median,
+        deaths_per_1000_lo,
+        deaths_per_1000_hi
+      ),
+    by = c(
+      "rule",
+      "dose_budget_fraction"
+    )
+  ) %>%
+  arrange(
+    dose_budget_fraction,
+    desc(
+      deaths_averted_per_1000_doses
+    )
+  )
+
+print(
+  fixed_dose_compact_70_uncertainty,
+  n = Inf,
+  width = Inf
+)
+```
+
+# 6G. Fixed-dose efficiency figure
+
+This figure answers the limited-supply question directly. Each facet holds vaccine efficacy
+fixed; the x-axis changes the national dose budget; and every rule receives the same number
+of doses within a given point on the x-axis.
+
+```{r fixed-dose-efficiency-figure, fig.width=8.0, fig.height=4.8}
+p_fixed_dose_per_1000 <- ggplot(
+  fixed_dose_uncertainty,
+  aes(
+    x = dose_budget_fraction,
+    y = deaths_per_1000_median,
+    linetype = rule,
+    shape = rule
+  )
+) +
+  geom_line() +
+  geom_point(size = 2.4) +
+  geom_errorbar(
+    aes(
+      ymin = deaths_per_1000_lo,
+      ymax = deaths_per_1000_hi
+    ),
+    width = 0.025
+  ) +
+  facet_wrap(
+    ~ efficacy,
+    labeller = labeller(
+      efficacy = function(x) {
+        paste0(
+          "Assumed efficacy = ",
+          scales::percent(
+            as.numeric(x),
+            accuracy = 1
+          )
+        )
+      }
+    )
+  ) +
+  scale_x_continuous(
+    breaks = DOSE_BUDGET_FRAC_GRID,
+    labels =
+      scales::percent_format(
+        accuracy = 1
+      )
+  ) +
+  labs(
+    x =
+      "National dose budget as share of eligible population",
+    y =
+      "Illustrative deaths averted per 1,000 doses\n(CFR-uncertainty sensitivity interval)",
+    linetype = NULL,
+    shape = NULL
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    legend.position = "bottom"
+  )
+
+print(p_fixed_dose_per_1000)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "fixed_dose_deaths_per_1000_doses.png"
+  ),
+  p_fixed_dose_per_1000,
+  width = 8.0,
+  height = 4.8,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "fixed_dose_deaths_per_1000_doses.pdf"
+  ),
+  p_fixed_dose_per_1000,
+  width = 8.0,
+  height = 4.8
+)
+```
+
+# 6H. Save fixed-dose uncertainty outputs
+
+```{r save-fixed-dose-uncertainty}
+readr::write_csv(
+  fixed_dose_uncertainty,
+  file.path(
+    OUT_DIR,
+    "fixed_dose_cfr_uncertainty.csv"
+  )
+)
+
+readr::write_csv(
+  fixed_dose_compact_70_uncertainty,
+  file.path(
+    OUT_DIR,
+    "fixed_dose_compact_VE70_with_uncertainty.csv"
+  )
+)
+```
+
+
+# 7. Verify the coverage-cancellation property
+
+Under a linear direct-protection model, per-dose efficiency should be identical across coverage
+values for a fixed efficacy and prioritization rule.
+
+```{r coverage-invariance}
+coverage_invariance <- averted_scenarios %>%
+  group_by(rule, efficacy) %>%
+  summarise(
+    min_deaths_per_1000 =
+      min(deaths_averted_per_1000_doses),
+    max_deaths_per_1000 =
+      max(deaths_averted_per_1000_doses),
+    range_deaths_per_1000 =
+      max_deaths_per_1000 - min_deaths_per_1000,
+
+    min_cases_per_1000 =
+      min(cases_averted_per_1000_doses),
+    max_cases_per_1000 =
+      max(cases_averted_per_1000_doses),
+    range_cases_per_1000 =
+      max_cases_per_1000 - min_cases_per_1000,
+    .groups = "drop"
+  )
+
+print(coverage_invariance)
+
+stopifnot(
+  max(coverage_invariance$range_deaths_per_1000) < 1e-10,
+  max(coverage_invariance$range_cases_per_1000) < 1e-10
+)
+```
+
+# 8. CFR uncertainty sensitivity
+
+This section propagates uncertainty in the two eligible-age observed CFR weights using independent
+Jeffreys beta posteriors:
+
+`CFR_a ~ Beta(deaths_a + 0.5, cases_a - deaths_a + 0.5)`.
+
+This does **not** represent full model posterior uncertainty. In particular, covariance in the INLA
+fitted incidence surface is not propagated. The primary INLA fit used `control.compute` without
+`config = TRUE` and with `return.marginals = FALSE`, so valid joint latent-field posterior sampling
+cannot be reconstructed from the saved fit without refitting the primary model. We therefore do
+not manufacture pseudo-posterior draws from marginal standard deviations. The resulting interval
+is labeled as a **CFR-uncertainty sensitivity interval**, not a full posterior credible interval.
+
+```{r cfr-uncertainty}
+set.seed(SEED)
+
+cfr_draws <- eligible_cfr %>%
+  mutate(
+    draw = purrr::map2(
+      deaths,
+      cases,
+      ~ stats::rbeta(
+        N_DRAWS,
+        shape1 = .x + 0.5,
+        shape2 = (.y - .x) + 0.5
+      )
+    )
+  ) %>%
+  select(age_band, draw) %>%
+  tidyr::unnest_longer(draw, indices_to = "draw_id") %>%
+  mutate(draw_id = as.integer(draw_id))
+
+# Aggregate the fitted 2024-2025 case burden by municipality and eligible age band.
+burden_by_muni_age <- eligible_monthly %>%
+  group_by(code_muni, age_band) %>%
+  summarise(
+    expected_cases_age_2425 =
+      sum(expected_cases_age, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+selected_codes <- selected_by_rule %>%
+  select(rule, code_muni)
+
+selected_age_burden <- selected_codes %>%
+  left_join(
+    burden_by_muni_age,
+    by = "code_muni",
+    relationship = "many-to-many"
+  ) %>%
+  group_by(rule, age_band) %>%
+  summarise(
+    expected_cases_age_2425 =
+      sum(expected_cases_age_2425),
+    .groups = "drop"
+  )
+
+draw_rule_deaths <- selected_age_burden %>%
+  inner_join(
+    cfr_draws,
+    by = "age_band",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(
+    expected_deaths_draw =
+      expected_cases_age_2425 * draw
+  ) %>%
+  group_by(rule, draw_id) %>%
+  summarise(
+    expected_deaths_eligible_2425 =
+      sum(expected_deaths_draw),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    rule_burden %>%
+      select(rule, selected_eligible_pop),
+    by = "rule"
+  )
+
+deaths_per_1000_uncertainty <- tidyr::crossing(
+  efficacy = EFFICACY_GRID,
+  coverage = COVERAGE_GRID
+) %>%
+  tidyr::crossing(
+    draw_rule_deaths
+  ) %>%
+  mutate(
+    doses_administered =
+      coverage * selected_eligible_pop,
+
+    expected_deaths_averted =
+      efficacy * coverage *
+      expected_deaths_eligible_2425,
+
+    deaths_averted_per_1000_doses =
+      1000 * expected_deaths_averted /
+      doses_administered
+  ) %>%
+  group_by(
+    rule,
+    efficacy,
+    coverage
+  ) %>%
+  summarise(
+    deaths_per_1000_median =
+      median(deaths_averted_per_1000_doses),
+    deaths_per_1000_lo =
+      quantile(
+        deaths_averted_per_1000_doses,
+        0.025
+      ),
+    deaths_per_1000_hi =
+      quantile(
+        deaths_averted_per_1000_doses,
+        0.975
+      ),
+    .groups = "drop"
+  )
+
+print(deaths_per_1000_uncertainty)
+```
+
+# 9. Compact comparison at 70% assumed efficacy
+
+The main reviewer-facing comparison is easiest to read at one middle efficacy scenario. Coverage
+is shown for total averted burden, while per-1,000-dose efficiency is unchanged by coverage.
+
+```{r compact-table}
+compact_70 <- averted_scenarios %>%
+  filter(efficacy == 0.70) %>%
+  left_join(
+    deaths_per_1000_uncertainty %>%
+      filter(efficacy == 0.70),
+    by = c(
+      "rule",
+      "efficacy",
+      "coverage"
+    )
+  ) %>%
+  select(
+    rule,
+    efficacy,
+    coverage,
+    doses_administered,
+    expected_cases_averted,
+    expected_deaths_averted,
+    cases_averted_per_1000_doses,
+    deaths_averted_per_1000_doses,
+    deaths_per_1000_median,
+    deaths_per_1000_lo,
+    deaths_per_1000_hi
+  )
+
+print(compact_70)
+```
+
+# 10. Sensitivity figures
+
+Panel A shows total expected deaths averted as coverage and assumed efficacy vary.
+
+Panel B shows the expected deaths averted per 1,000 doses. Because coverage cancels under the
+linear model, the x-axis is efficacy and each prioritization rule has one curve.
+
+```{r figures, fig.width=7.6, fig.height=4.5}
+p_total_deaths <- ggplot(
+  averted_scenarios,
+  aes(
+    x = coverage,
+    y = expected_deaths_averted,
+    linetype = rule,
+    shape = rule
+  )
+) +
+  geom_line() +
+  geom_point(size = 2.2) +
+  facet_wrap(
+    ~ efficacy,
+    labeller = labeller(
+      efficacy = function(x) {
+        paste0("Assumed efficacy = ", x)
+      }
+    )
+  ) +
+  scale_x_continuous(
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  labs(
+    x = "Assumed coverage of eligible population",
+    y = "Illustrative expected deaths averted",
+    linetype = NULL,
+    shape = NULL
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    legend.position = "bottom"
+  )
+
+print(p_total_deaths)
+```
+
+```{r per-dose-figure, fig.width=7.0, fig.height=4.4}
+per_dose_plot <- deaths_per_1000_uncertainty %>%
+  group_by(rule, efficacy) %>%
+  summarise(
+    median = first(deaths_per_1000_median),
+    lo = first(deaths_per_1000_lo),
+    hi = first(deaths_per_1000_hi),
+    .groups = "drop"
+  )
+
+p_per_1000 <- ggplot(
+  per_dose_plot,
+  aes(
+    x = efficacy,
+    y = median,
+    linetype = rule,
+    shape = rule
+  )
+) +
+  geom_line() +
+  geom_point(size = 2.4) +
+  geom_errorbar(
+    aes(
+      ymin = lo,
+      ymax = hi
+    ),
+    width = 0.025
+  ) +
+  scale_x_continuous(
+    breaks = EFFICACY_GRID,
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  labs(
+    x = "Assumed direct vaccine efficacy",
+    y = "Illustrative deaths averted per 1,000 doses\n(CFR-uncertainty sensitivity interval)",
+    linetype = NULL,
+    shape = NULL
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    legend.position = "bottom"
+  )
+
+print(p_per_1000)
+```
+
+# 11. Save outputs
+
+```{r save-outputs}
+readr::write_csv(
+  rule_burden,
+  file.path(
+    OUT_DIR,
+    "averted_burden_selected_rule_inputs.csv"
+  )
+)
+
+readr::write_csv(
+  averted_scenarios,
+  file.path(
+    OUT_DIR,
+    "averted_burden_efficacy_coverage_scenarios.csv"
+  )
+)
+
+readr::write_csv(
+  coverage_invariance,
+  file.path(
+    OUT_DIR,
+    "averted_burden_per_1000_coverage_invariance.csv"
+  )
+)
+
+readr::write_csv(
+  deaths_per_1000_uncertainty,
+  file.path(
+    OUT_DIR,
+    "averted_burden_per_1000_cfr_uncertainty.csv"
+  )
+)
+
+readr::write_csv(
+  compact_70,
+  file.path(
+    OUT_DIR,
+    "averted_burden_compact_70pct_efficacy.csv"
+  )
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "averted_burden_total_deaths_sensitivity.png"
+  ),
+  p_total_deaths,
+  width = 7.6,
+  height = 4.5,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "averted_burden_total_deaths_sensitivity.pdf"
+  ),
+  p_total_deaths,
+  width = 7.6,
+  height = 4.5
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "averted_burden_deaths_per_1000_doses.png"
+  ),
+  p_per_1000,
+  width = 7.0,
+  height = 4.4,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "averted_burden_deaths_per_1000_doses.pdf"
+  ),
+  p_per_1000,
+  width = 7.0,
+  height = 4.4
+)
+
+cat("\nSaved File 20 outputs to:\n", OUT_DIR, "\n")
+```
+
+# 12. Final checks
+
+```{r final-checks}
+stopifnot(
+  nrow(rule_burden) == 3L,
+  nrow(averted_scenarios) ==
+    3L * length(EFFICACY_GRID) * length(COVERAGE_GRID),
+  all(averted_scenarios$doses_administered > 0),
+  all(averted_scenarios$expected_cases_averted >= 0),
+  all(averted_scenarios$expected_deaths_averted >= 0),
+  all(averted_scenarios$cases_averted_per_1000_doses >= 0),
+  all(averted_scenarios$deaths_averted_per_1000_doses >= 0),
+  all(fixed_dose_scenarios$expected_cases_averted >= 0),
+  all(fixed_dose_scenarios$expected_deaths_averted >= 0),
+  all(fixed_dose_scenarios$cases_averted_per_1000_doses >= 0),
+  all(fixed_dose_scenarios$deaths_averted_per_1000_doses >= 0)
+)
+
+cat("\n============================================================\n")
+cat("ILLUSTRATIVE AVERTED-BURDEN SENSITIVITY COMPLETE\n")
+cat("Eligible age window: 18-59\n")
+cat("Selection: top", TOP_N, "of", EXPECTED_N_MUNI, "municipalities\n")
+cat("Efficacy grid:", paste(EFFICACY_GRID, collapse = ", "), "\n")
+cat("Coverage grid:", paste(COVERAGE_GRID, collapse = ", "), "\n")
+cat("============================================================\n")
+
+
+cols <- c(
+  "Transmission-only" = "#D55E00",
+  "Expected-burden" = "#0072B2",
+  "Age/severity-only" = "#009E73"
+)
+
+shapes <- c(
+  "Transmission-only" = 15,
+  "Expected-burden" = 17,
+  "Age/severity-only" = 16
+)
+
+p_fixed_dose_per_1000_polished <- ggplot(
+  fixed_dose_uncertainty,
+  aes(
+    x = dose_budget_fraction,
+    y = deaths_per_1000_median,
+    color = rule,
+    shape = rule,
+    group = rule
+  )
+) +
+  geom_line(
+    linewidth = 0.85
+  ) +
+  geom_errorbar(
+    aes(
+      ymin = deaths_per_1000_lo,
+      ymax = deaths_per_1000_hi
+    ),
+    width = 0.018,
+    linewidth = 0.55
+  ) +
+  geom_point(
+    size = 2.7
+  ) +
+  facet_wrap(
+    ~ efficacy,
+    nrow = 1,
+    labeller = labeller(
+      efficacy = function(x) {
+        paste0(
+          "Assumed efficacy = ",
+          scales::percent(
+            as.numeric(x),
+            accuracy = 1
+          )
+        )
+      }
+    )
+  ) +
+  scale_color_manual(values = cols) +
+  scale_shape_manual(values = shapes) +
+  scale_x_continuous(
+    breaks = c(0.25, 0.50, 0.75),
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0.04, 0.04))
+  ) +
+  scale_y_continuous(
+    labels = label_number(
+      accuracy = 0.0001
+    ),
+    expand = expansion(mult = c(0.05, 0.08))
+  ) +
+  labs(
+    x = "National dose budget as share of eligible population",
+    y = "Deaths averted per 1,000 doses",
+    color = NULL,
+    shape = NULL
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(
+      face = "bold",
+      size = 11
+    ),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9.5),
+    legend.position = "bottom",
+    legend.text = element_text(size = 9.5),
+    panel.spacing = unit(1.2, "lines")
+  )
+
+p_fixed_dose_per_1000_polished
+```
+
+# Interpretation guardrails
+
+- This is an **illustrative scenario calculation**, not a causal vaccine impact analysis.
+- The assumed efficacy values (0.50, 0.70, 0.90) and coverage values (0.25, 0.50, 0.75)
+  are sensitivity scenarios, not empirical estimates.
+- The calculation assumes direct protection is linear in coverage and efficacy.
+- It assumes the primary model's municipality-specific incidence applies proportionally to the
+  eligible 18-59 age bands within each municipality.
+- It does not model indirect effects, herd protection, waning, dose wastage, contraindications
+  beyond age, logistics, or behavioral responses.
+- Because this is a linear direct-protection model, coverage changes total expected burden
+  averted but **does not change outcomes averted per 1,000 administered doses**.
+- The reported uncertainty interval propagates uncertainty in the age-specific CFR weights only.
+  It is **not a full posterior credible interval** for the vaccine impact calculation.
+- The purpose is to compare prioritization rules under common assumptions, not to estimate the
+  real-world effect of the 2026 pilot.

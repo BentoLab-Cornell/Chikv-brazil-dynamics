@@ -1,0 +1,501 @@
+---
+title: "21 - Step 18 Race/Ethnicity Denominators Using IBGE 2022 Census"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+This file implements **Ana revision-plan Step 18: race and ethnicity denominators**.
+
+The existing race analysis in File 04 is intentionally case-based only: it reports the
+distribution of confirmed chikungunya cases/deaths and race-specific case fatality, but it does
+**not** use a population denominator.
+
+Here we add a denominator-matched analysis using the **IBGE 2022 Census population by
+self-declared color/race at macro-region level**.
+
+Primary analysis:
+- Numerator: confirmed chikungunya cases notified in **calendar year 2022**
+- Denominator: **2022 Census resident population** in the matching macro-region and
+  color/race category
+- Outcome: confirmed chikungunya incidence per 100,000 population
+
+Secondary descriptive analysis:
+- 2016-2025 confirmed cases divided by the 2022 Census race-specific population.
+- This is labeled **cumulative reported case burden per 100,000 2022 Census population**,
+  not annual incidence, because a single 2022 denominator is not an annual population series.
+
+Important:
+- Missing/unknown SINAN race is not assigned to any racial/ethnic group.
+- The denominator uses the IBGE **cor ou raça** Indigenous count, not the broader total
+  Indigenous population that also includes persons identified through the separate
+  "se considera indígena" question. This matches SINAN's race/color field more closely.
+- This analysis is descriptive and does not establish causal racial/ethnic disparities.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(scales)
+  library(readr)
+})
+
+STUDY_START_YEAR <- 2016L
+STUDY_END_YEAR <- 2025L
+DENOM_YEAR <- 2022L
+
+RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+OUT_DIR <- file.path(RESULT_ROOT, "race_ethnicity_denominators_IBGE2022")
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+if (!exists("Chik_total")) {
+  stop(
+    "Chik_total is not currently in memory. Run 01_data_import_cleaning.Rmd once in this ",
+    "R session, then rerun File 21."
+  )
+}
+```
+
+# 1. IBGE 2022 Census denominators
+
+Source:
+IBGE, Censo Demográfico 2022, resident population by self-declared color/race and
+Grandes Regiões. The Indigenous counts below are the **cor ou raça indígena**
+counts, not the broader Indigenous-population total.
+
+```{r ibge-denominators}
+ibge_race_region_2022 <- tibble::tribble(
+  ~region,        ~race_label,       ~population_2022,
+  "North",        "White",                  3598298,
+  "North",        "Black",                  1530418,
+  "North",        "Asian",                    29467,
+  "North",        "Pardo (Mixed)",         11654390,
+  "North",        "Indigenous",              539821,
+
+  "Northeast",    "White",                 14571557,
+  "Northeast",    "Black",                  7127018,
+  "Northeast",    "Asian",                    68749,
+  "Northeast",    "Pardo (Mixed)",         32559846,
+  "Northeast",    "Indigenous",              327725,
+
+  "Southeast",    "White",                 42318768,
+  "Southeast",    "Black",                  9003372,
+  "Southeast",    "Asian",                   570852,
+  "Southeast",    "Pardo (Mixed)",         32833389,
+  "Southeast",    "Indigenous",              109934,
+
+  "South",        "White",                 21729713,
+  "South",        "Black",                  1505526,
+  "South",        "Asian",                   120838,
+  "South",        "Pardo (Mixed)",          6499382,
+  "South",        "Indigenous",               81478,
+
+  "Central-West", "White",                  6033785,
+  "Central-West", "Black",                  1490124,
+  "Central-West", "Asian",                    60224,
+  "Central-West", "Pardo (Mixed)",          8536279,
+  "Central-West", "Indigenous",              168684
+)
+
+national_check <- ibge_race_region_2022 %>%
+  group_by(race_label) %>%
+  summarise(population_2022 = sum(population_2022), .groups = "drop")
+
+print(national_check)
+
+expected_national <- tibble::tribble(
+  ~race_label,       ~expected_population,
+  "White",                  88252121,
+  "Black",                  20656458,
+  "Asian",                    850130,
+  "Pardo (Mixed)",          92083286,
+  "Indigenous",              1227642
+)
+
+denom_check <- national_check %>%
+  left_join(expected_national, by = "race_label") %>%
+  mutate(diff = population_2022 - expected_population)
+
+print(denom_check)
+
+stopifnot(all(denom_check$diff == 0L))
+```
+
+# 2. Prepare confirmed SINAN cases and map macro-region
+
+```{r prepare-cases}
+race_lut <- c(
+  `1` = "White",
+  `2` = "Black",
+  `3` = "Asian",
+  `4` = "Pardo (Mixed)",
+  `5` = "Indigenous",
+  `9` = "Unknown"
+)
+
+state_region_lookup <- tibble::tribble(
+  ~uf_code, ~region,
+  "11", "North",
+  "12", "North",
+  "13", "North",
+  "14", "North",
+  "15", "North",
+  "16", "North",
+  "17", "North",
+
+  "21", "Northeast",
+  "22", "Northeast",
+  "23", "Northeast",
+  "24", "Northeast",
+  "25", "Northeast",
+  "26", "Northeast",
+  "27", "Northeast",
+  "28", "Northeast",
+  "29", "Northeast",
+
+  "31", "Southeast",
+  "32", "Southeast",
+  "33", "Southeast",
+  "35", "Southeast",
+
+  "41", "South",
+  "42", "South",
+  "43", "South",
+
+  "50", "Central-West",
+  "51", "Central-West",
+  "52", "Central-West",
+  "53", "Central-West"
+)
+
+race_cases <- Chik_total %>%
+  mutate(
+    year = lubridate::year(as.Date(DT_SIN_PRI)),
+    code_muni = stringr::str_pad(
+      substr(as.character(ID_MUNICIP), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    uf_code = substr(code_muni, 1, 2),
+    race_code = as.character(CS_RACA),
+    race_label = dplyr::recode(
+      race_code,
+      !!!race_lut,
+      .default = "Missing/other"
+    ),
+    race_named = race_code %in% as.character(1:5)
+  ) %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    year >= STUDY_START_YEAR,
+    year <= STUDY_END_YEAR
+  ) %>%
+  left_join(
+    state_region_lookup,
+    by = "uf_code"
+  )
+
+stopifnot(!anyNA(race_cases$region))
+
+cat("Confirmed cases, 2016-2025:", nrow(race_cases), "\n")
+```
+
+# 3. Race missingness by macro-region
+
+```{r missingness}
+race_missingness_region <- race_cases %>%
+  group_by(region) %>%
+  summarise(
+    confirmed_cases = n(),
+    named_race_cases = sum(race_named),
+    missing_unknown_race = sum(!race_named),
+    missing_unknown_percent =
+      100 * missing_unknown_race / confirmed_cases,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(missing_unknown_percent))
+
+print(race_missingness_region)
+```
+
+# 4. Primary analysis: 2022 race-specific incidence
+
+This is the clean denominator-matched analysis because numerator and denominator refer to
+the same calendar year.
+
+```{r incidence-2022}
+race_cases_2022 <- race_cases %>%
+  filter(
+    year == DENOM_YEAR,
+    race_named
+  ) %>%
+  count(
+    region,
+    race_label,
+    name = "cases_2022"
+  )
+
+race_incidence_2022 <- ibge_race_region_2022 %>%
+  left_join(
+    race_cases_2022,
+    by = c("region", "race_label")
+  ) %>%
+  mutate(
+    cases_2022 = tidyr::replace_na(cases_2022, 0L),
+    incidence_per_100k =
+      1e5 * cases_2022 / population_2022
+  ) %>%
+  arrange(region, desc(incidence_per_100k))
+
+print(race_incidence_2022, n = Inf)
+
+stopifnot(
+  nrow(race_incidence_2022) == 25L,
+  all(race_incidence_2022$population_2022 > 0),
+  all(is.finite(race_incidence_2022$incidence_per_100k))
+)
+```
+
+# 5. National 2022 race-specific incidence
+
+```{r national-2022}
+national_race_2022 <- race_incidence_2022 %>%
+  group_by(race_label) %>%
+  summarise(
+    cases_2022 = sum(cases_2022),
+    population_2022 = sum(population_2022),
+    incidence_per_100k =
+      1e5 * cases_2022 / population_2022,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(incidence_per_100k))
+
+print(national_race_2022)
+```
+
+# 6. Secondary: cumulative 2016-2025 burden relative to 2022 Census population
+
+This is **not** called incidence. It is retained only to show the full study-period case
+distribution relative to a common census denominator.
+
+```{r cumulative-burden}
+race_cases_full <- race_cases %>%
+  filter(race_named) %>%
+  count(
+    region,
+    race_label,
+    name = "cases_2016_2025"
+  )
+
+race_cumulative_burden <- ibge_race_region_2022 %>%
+  left_join(
+    race_cases_full,
+    by = c("region", "race_label")
+  ) %>%
+  mutate(
+    cases_2016_2025 =
+      tidyr::replace_na(cases_2016_2025, 0L),
+    cumulative_cases_per_100k_2022_population =
+      1e5 * cases_2016_2025 / population_2022
+  ) %>%
+  arrange(
+    region,
+    desc(cumulative_cases_per_100k_2022_population)
+  )
+
+print(race_cumulative_burden, n = Inf)
+```
+
+# 7. 2022 macro-region figure
+
+```{r figure, fig.width=8.2, fig.height=5.2}
+p_race_incidence_2022 <- ggplot(
+  race_incidence_2022,
+  aes(
+    x = race_label,
+    y = incidence_per_100k,
+    shape = race_label
+  )
+) +
+  geom_point(size = 2.6) +
+  facet_wrap(
+    ~ region,
+    scales = "free_y"
+  ) +
+  labs(
+    x = "Race / ethnicity",
+    y = "Confirmed chikungunya incidence per 100,000",
+    title = "Race-specific confirmed chikungunya incidence by macro-region, Brazil, 2022"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(
+      angle = 35,
+      hjust = 1
+    )
+  )
+
+print(p_race_incidence_2022)
+```
+
+# 8. Compare case composition with population composition in 2022
+
+This is useful for interpretation but should not replace the incidence rates.
+
+```{r composition}
+population_composition_2022 <- ibge_race_region_2022 %>%
+  group_by(region) %>%
+  mutate(
+    population_share =
+      population_2022 / sum(population_2022)
+  ) %>%
+  ungroup()
+
+case_composition_2022 <- race_cases %>%
+  filter(
+    year == DENOM_YEAR,
+    race_named
+  ) %>%
+  count(
+    region,
+    race_label,
+    name = "cases_2022"
+  ) %>%
+  group_by(region) %>%
+  mutate(
+    case_share =
+      cases_2022 / sum(cases_2022)
+  ) %>%
+  ungroup()
+
+composition_compare_2022 <- population_composition_2022 %>%
+  select(
+    region,
+    race_label,
+    population_2022,
+    population_share
+  ) %>%
+  left_join(
+    case_composition_2022,
+    by = c("region", "race_label")
+  ) %>%
+  mutate(
+    cases_2022 = tidyr::replace_na(cases_2022, 0L),
+    case_share = tidyr::replace_na(case_share, 0)
+  )
+
+print(composition_compare_2022, n = Inf)
+```
+
+# 9. Save outputs
+
+```{r save}
+readr::write_csv(
+  ibge_race_region_2022,
+  file.path(
+    OUT_DIR,
+    "ibge_2022_race_population_macroregion.csv"
+  )
+)
+
+readr::write_csv(
+  race_missingness_region,
+  file.path(
+    OUT_DIR,
+    "race_missingness_by_macroregion_2016_2025.csv"
+  )
+)
+
+readr::write_csv(
+  race_incidence_2022,
+  file.path(
+    OUT_DIR,
+    "race_specific_incidence_macroregion_2022.csv"
+  )
+)
+
+readr::write_csv(
+  national_race_2022,
+  file.path(
+    OUT_DIR,
+    "race_specific_incidence_national_2022.csv"
+  )
+)
+
+readr::write_csv(
+  race_cumulative_burden,
+  file.path(
+    OUT_DIR,
+    "race_cumulative_case_burden_vs_2022_population_2016_2025.csv"
+  )
+)
+
+readr::write_csv(
+  composition_compare_2022,
+  file.path(
+    OUT_DIR,
+    "race_case_vs_population_composition_2022.csv"
+  )
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "race_specific_incidence_macroregion_2022.png"
+  ),
+  p_race_incidence_2022,
+  width = 8.2,
+  height = 5.2,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "race_specific_incidence_macroregion_2022.pdf"
+  ),
+  p_race_incidence_2022,
+  width = 8.2,
+  height = 5.2
+)
+
+cat("\nSaved Step 18 outputs to:\n", OUT_DIR, "\n")
+```
+
+# 10. Final checks
+
+```{r final-checks}
+stopifnot(
+  nrow(ibge_race_region_2022) == 25L,
+  nrow(race_incidence_2022) == 25L,
+  nrow(national_race_2022) == 5L,
+  all(is.finite(race_incidence_2022$incidence_per_100k)),
+  all(race_incidence_2022$incidence_per_100k >= 0)
+)
+
+cat("\n============================================================\n")
+cat("STEP 18 RACE/ETHNICITY DENOMINATOR ANALYSIS COMPLETE\n")
+cat("Primary denominator-matched year: 2022\n")
+cat("Geographic level: 5 Brazilian macro-regions\n")
+cat("Race categories: White, Black, Asian, Pardo (Mixed), Indigenous\n")
+cat("============================================================\n")
+```
+
+# Interpretation guardrails
+
+1. The **primary race-specific incidence result is 2022 only**, because that is the year for
+   which the numerator and census denominator align exactly.
+2. The 2016-2025 calculation uses the 2022 Census denominator only as a common reference;
+   call it cumulative reported case burden, not annual incidence.
+3. Missing/unknown SINAN race remains substantial and can vary geographically.
+4. These rates describe confirmed/notified disease burden and therefore remain sensitive to
+   access to care, case ascertainment, diagnostic capacity, and race recording completeness.
+5. Do not describe differences as biological susceptibility or causal effects of race/ethnicity.

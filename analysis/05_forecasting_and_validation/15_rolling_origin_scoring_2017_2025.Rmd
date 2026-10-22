@@ -1,0 +1,999 @@
+---
+title: "15B - Rolling-Origin Forecast Scoring, 2017-2025"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+This file scores the nine completed one-year-ahead rolling-origin forecasts from 2017-2025.
+
+For each target year, municipality rankings are constructed using information available before that year and evaluated against the following year's observed chikungunya cases and deaths.
+
+Three rules are compared at identical coverage:
+
+1. Rolling-origin INLA forecast ranking.
+2. Age-only ranking using the previous year's proportion aged 65+.
+3. Naive ranking using the previous year's reported chikungunya cases.
+
+The primary performance measure is the share of observed target-year cases or deaths captured by the top one-third of municipalities.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+
+source("00_setup.R")
+
+STUDY_START <- 2016L
+STUDY_END <- 2025L
+TARGET_YEARS <- 2017:2025
+EXPECTED_N_MUNI <- 5570L
+TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
+
+results_dir <- path.expand("~/Downloads/inla_results")
+pred_dir <- file.path(results_dir, "rolling_origin", "predictions")
+score_dir <- file.path(results_dir, "rolling_origin", "scoring")
+
+dir.create(score_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Target years:", paste(TARGET_YEARS, collapse = ", "), "\n")
+cat("Matched top-third municipality count:", TOP_N, "\n")
+```
+
+# 1. Load completed inputs
+
+```{r load-inputs}
+if (!exists("pop_panel_age")) {
+  if (!file.exists("pop_panel_age.rds")) {
+    stop("pop_panel_age.rds not found in the working directory.")
+  }
+  pop_panel_age <- readRDS("pop_panel_age.rds")
+}
+
+if (!exists("Chik_total")) {
+  stop(
+    "Chik_total is not in memory. Run the revised 01_data_import_cleaning.Rmd first, ",
+    "then run this scoring file."
+  )
+}
+
+stopifnot(
+  n_distinct(pop_panel_age$code_muni) == EXPECTED_N_MUNI
+)
+
+pred_files <- file.path(
+  pred_dir,
+  sprintf("forecast_annual_predict_%d.csv", TARGET_YEARS)
+)
+
+missing_pred <- pred_files[!file.exists(pred_files)]
+
+if (length(missing_pred) > 0) {
+  stop(
+    "Missing rolling-origin prediction files:\n",
+    paste(missing_pred, collapse = "\n")
+  )
+}
+
+cat("All 9 prediction files found.\n")
+```
+
+# 2. Standardize municipality IDs and build observed annual outcomes
+
+`Chik_total` is already the confirmed 2016-2025 analytic dataset. Observed outcomes are aggregated by municipality and notification year.
+
+```{r observed-outcomes}
+observed_annual <- Chik_total %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(ID_MUNICIP), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    year = lubridate::year(as.Date(DT_SIN_PRI)),
+    death = as.integer(as.character(EVOLUCAO) == "2")
+  ) %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    year %in% STUDY_START:STUDY_END,
+    !is.na(code_muni)
+  ) %>%
+  group_by(code_muni, year) %>%
+  summarise(
+    cases = n(),
+    deaths = sum(death, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+muni_universe <- pop_panel_age %>%
+  transmute(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  ) %>%
+  distinct() %>%
+  arrange(code_muni)
+
+stopifnot(nrow(muni_universe) == EXPECTED_N_MUNI)
+
+annual_grid <- tidyr::crossing(
+  code_muni = muni_universe$code_muni,
+  year = STUDY_START:STUDY_END
+) %>%
+  left_join(observed_annual, by = c("code_muni", "year")) %>%
+  mutate(
+    cases = replace_na(cases, 0L),
+    deaths = replace_na(deaths, 0L)
+  )
+
+cat("Observed annual grid rows:", nrow(annual_grid), "\n")
+cat("Observed cases 2016-2025:", sum(annual_grid$cases), "\n")
+cat("Observed deaths 2016-2025:", sum(annual_grid$deaths), "\n")
+```
+
+# 3. Build the age-only baseline using past-only information
+
+For target year `t`, the age-only rule uses the proportion aged 65+ in year `t-1`.
+
+```{r age-only}
+age65_by_year <- pop_panel_age %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  ) %>%
+  filter(year %in% STUDY_START:(STUDY_END - 1L)) %>%
+  group_by(code_muni, year) %>%
+  summarise(
+    total_pop = sum(pop, na.rm = TRUE),
+    pop_65plus = sum(pop[age >= 65], na.rm = TRUE),
+    prop_65plus = pop_65plus / total_pop,
+    .groups = "drop"
+  )
+
+stopifnot(
+  n_distinct(age65_by_year$code_muni) == EXPECTED_N_MUNI,
+  sum(!is.finite(age65_by_year$prop_65plus)) == 0L
+)
+```
+
+# 4. Read and validate the nine rolling-origin forecasts
+
+```{r load-forecasts}
+forecast_all <- purrr::map_dfr(
+  TARGET_YEARS,
+  function(yy) {
+    f <- file.path(
+      pred_dir,
+      sprintf("forecast_annual_predict_%d.csv", yy)
+    )
+
+    x <- readr::read_csv(
+      f,
+      show_col_types = FALSE,
+      col_types = cols(
+        code_muni = col_character(),
+        .default = col_guess()
+      )
+    ) %>%
+      mutate(
+        code_muni = stringr::str_pad(
+          substr(as.character(code_muni), 1, 6),
+          width = 6,
+          side = "left",
+          pad = "0"
+        ),
+        target_year = as.integer(target_year)
+      )
+
+    required_cols <- c(
+      "code_muni",
+      "target_year",
+      "forecast_annual"
+    )
+
+    if (!all(required_cols %in% names(x))) {
+      stop(
+        "Missing required columns in ",
+        basename(f),
+        ": ",
+        paste(setdiff(required_cols, names(x)), collapse = ", ")
+      )
+    }
+
+    if (nrow(x) != EXPECTED_N_MUNI) {
+      stop(
+        basename(f),
+        " has ",
+        nrow(x),
+        " rows; expected ",
+        EXPECTED_N_MUNI,
+        "."
+      )
+    }
+
+    if (n_distinct(x$code_muni) != EXPECTED_N_MUNI) {
+      stop("Duplicate or missing municipalities in ", basename(f), ".")
+    }
+
+    if (!all(x$target_year == yy)) {
+      stop("target_year mismatch in ", basename(f), ".")
+    }
+
+    if (any(!is.finite(x$forecast_annual))) {
+      stop("Non-finite forecast_annual values in ", basename(f), ".")
+    }
+
+    x %>%
+      select(code_muni, target_year, forecast_annual)
+  }
+)
+
+stopifnot(
+  nrow(forecast_all) == EXPECTED_N_MUNI * length(TARGET_YEARS),
+  n_distinct(forecast_all$target_year) == length(TARGET_YEARS)
+)
+
+print(
+  forecast_all %>%
+    count(target_year, name = "n_municipalities")
+)
+```
+
+# 5. Assemble a past-only evaluation dataset for each target year
+
+For each target year:
+
+- `forecast_annual` is the model forecast generated without observing the target year.
+- `last_year_cases` is the prior year's observed case count.
+- `prop_65plus` is the prior year's population proportion aged 65+.
+- `actual_cases` and `actual_deaths` are used only for evaluation.
+
+```{r evaluation-dataset}
+evaluation_data <- purrr::map_dfr(
+  TARGET_YEARS,
+  function(yy) {
+
+    forecast_y <- forecast_all %>%
+      filter(target_year == yy)
+
+    actual_y <- annual_grid %>%
+      filter(year == yy) %>%
+      transmute(
+        code_muni,
+        actual_cases = cases,
+        actual_deaths = deaths
+      )
+
+    last_year_y <- annual_grid %>%
+      filter(year == yy - 1L) %>%
+      transmute(
+        code_muni,
+        last_year_cases = cases
+      )
+
+    age_y <- age65_by_year %>%
+      filter(year == yy - 1L) %>%
+      transmute(
+        code_muni,
+        prop_65plus
+      )
+
+    out <- muni_universe %>%
+      left_join(forecast_y, by = "code_muni") %>%
+      left_join(last_year_y, by = "code_muni") %>%
+      left_join(age_y, by = "code_muni") %>%
+      left_join(actual_y, by = "code_muni") %>%
+      mutate(
+        target_year = yy,
+        last_year_cases = replace_na(last_year_cases, 0L),
+        actual_cases = replace_na(actual_cases, 0L),
+        actual_deaths = replace_na(actual_deaths, 0L)
+      )
+
+    stopifnot(
+      nrow(out) == EXPECTED_N_MUNI,
+      sum(is.na(out$forecast_annual)) == 0L,
+      sum(is.na(out$prop_65plus)) == 0L,
+      sum(is.na(out$actual_cases)) == 0L,
+      sum(is.na(out$actual_deaths)) == 0L
+    )
+
+    out
+  }
+)
+
+cat("Evaluation rows:", nrow(evaluation_data), "\n")
+```
+
+# 6. Score matched top-third capture
+
+Exactly `TOP_N` municipalities are selected for every rule and target year.
+
+Ties are broken deterministically by municipality code so that each rule always selects the same number of municipalities.
+
+```{r score-functions}
+capture_top_n <- function(df, rank_col, outcome_col, n_select = TOP_N) {
+
+  total_outcome <- sum(df[[outcome_col]], na.rm = TRUE)
+
+  if (total_outcome <= 0) {
+    return(
+      tibble(
+        captured = NA_real_,
+        total = total_outcome,
+        capture_share = NA_real_
+      )
+    )
+  }
+
+  selected <- df %>%
+    arrange(
+      desc(.data[[rank_col]]),
+      code_muni
+    ) %>%
+    slice_head(n = n_select)
+
+  tibble(
+    captured = sum(selected[[outcome_col]], na.rm = TRUE),
+    total = total_outcome,
+    capture_share = captured / total
+  )
+}
+
+rule_spec <- tibble(
+  rule = c(
+    "Rolling-origin forecast",
+    "Age-only",
+    "Last-year cases"
+  ),
+  rank_col = c(
+    "forecast_annual",
+    "prop_65plus",
+    "last_year_cases"
+  )
+)
+
+score_one_year <- function(df_year) {
+
+  yy <- unique(df_year$target_year)
+
+  purrr::pmap_dfr(
+    rule_spec,
+    function(rule, rank_col) {
+
+      cases_score <- capture_top_n(
+        df_year,
+        rank_col = rank_col,
+        outcome_col = "actual_cases"
+      )
+
+      deaths_score <- capture_top_n(
+        df_year,
+        rank_col = rank_col,
+        outcome_col = "actual_deaths"
+      )
+
+      tibble(
+        target_year = yy,
+        rule = rule,
+        n_selected = TOP_N,
+        cases_captured = cases_score$captured,
+        cases_total = cases_score$total,
+        cases_capture_share = cases_score$capture_share,
+        deaths_captured = deaths_score$captured,
+        deaths_total = deaths_score$total,
+        deaths_capture_share = deaths_score$capture_share
+      )
+    }
+  )
+}
+```
+
+```{r yearly-scoring}
+yearly_performance <- evaluation_data %>%
+  group_split(target_year) %>%
+  purrr::map_dfr(score_one_year) %>%
+  arrange(target_year, factor(
+    rule,
+    levels = c(
+      "Rolling-origin forecast",
+      "Age-only",
+      "Last-year cases"
+    )
+  ))
+
+print(yearly_performance, n = Inf)
+```
+
+# 7. Summarize performance across the nine held-out years
+
+The median is the primary cross-year summary. Interquartile range and full range are retained to show year-to-year variability.
+
+```{r summary-performance}
+performance_summary <- yearly_performance %>%
+  group_by(rule) %>%
+  summarise(
+    n_years = n(),
+    median_cases_capture = median(cases_capture_share, na.rm = TRUE),
+    q25_cases_capture = quantile(cases_capture_share, 0.25, na.rm = TRUE),
+    q75_cases_capture = quantile(cases_capture_share, 0.75, na.rm = TRUE),
+    min_cases_capture = min(cases_capture_share, na.rm = TRUE),
+    max_cases_capture = max(cases_capture_share, na.rm = TRUE),
+    median_deaths_capture = median(deaths_capture_share, na.rm = TRUE),
+    q25_deaths_capture = quantile(deaths_capture_share, 0.25, na.rm = TRUE),
+    q75_deaths_capture = quantile(deaths_capture_share, 0.75, na.rm = TRUE),
+    min_deaths_capture = min(deaths_capture_share, na.rm = TRUE),
+    max_deaths_capture = max(deaths_capture_share, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(performance_summary)
+```
+
+# 8. Main rolling-origin performance figure
+
+Each point is a genuinely held-out target year. The dashed horizontal line marks the 33.3% expected share under a random one-third selection, shown only as a visual reference rather than as an additional fitted baseline.
+
+```{r figure-data}
+plot_data <- yearly_performance %>%
+  select(
+    target_year,
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  pivot_longer(
+    cols = c(
+      cases_capture_share,
+      deaths_capture_share
+    ),
+    names_to = "outcome",
+    values_to = "capture_share"
+  ) %>%
+  mutate(
+    outcome = recode(
+      outcome,
+      cases_capture_share = "Observed cases captured",
+      deaths_capture_share = "Observed deaths captured"
+    ),
+    rule = factor(
+      rule,
+      levels = c(
+        "Rolling-origin forecast",
+        "Age-only",
+        "Last-year cases"
+      )
+    )
+  )
+```
+
+```{r main-figure, fig.width=9.2, fig.height=4.4}
+# Final Figure 6 design used for the manuscript Results.
+rule_colors <- c(
+  "Rolling-origin forecast" = "#0072B2",
+  "Last-year cases" = "#D55E00",
+  "Age-only" = "#009E73"
+)
+
+rule_shapes <- c(
+  "Rolling-origin forecast" = 16,
+  "Last-year cases" = 15,
+  "Age-only" = 17
+)
+
+plot_data <- yearly_performance %>%
+  select(target_year, rule, cases_capture_share, deaths_capture_share) %>%
+  pivot_longer(
+    cols = c(cases_capture_share, deaths_capture_share),
+    names_to = "outcome",
+    values_to = "capture_share"
+  ) %>%
+  mutate(
+    outcome = recode(
+      outcome,
+      cases_capture_share = "Reported cases",
+      deaths_capture_share = "Reported deaths"
+    ),
+    rule = factor(
+      rule,
+      levels = c("Rolling-origin forecast", "Last-year cases", "Age-only")
+    )
+  )
+
+make_capture_panel <- function(data, outcome_label) {
+  data %>%
+    filter(outcome == outcome_label) %>%
+    ggplot(
+      aes(
+        x = target_year,
+        y = capture_share,
+        color = rule,
+        shape = rule,
+        group = rule
+      )
+    ) +
+    geom_hline(
+      yintercept = TOP_N / EXPECTED_N_MUNI,
+      linewidth = 0.5,
+      linetype = "dotted"
+    ) +
+    geom_line(aes(linewidth = rule)) +
+    geom_point(size = 2.6) +
+    scale_color_manual(values = rule_colors) +
+    scale_shape_manual(values = rule_shapes) +
+    scale_linewidth_manual(
+      values = c(
+        "Rolling-origin forecast" = 1.05,
+        "Last-year cases" = 0.85,
+        "Age-only" = 0.85
+      ),
+      guide = "none"
+    ) +
+    scale_x_continuous(breaks = TARGET_YEARS) +
+    scale_y_continuous(
+      labels = scales::percent_format(accuracy = 1),
+      breaks = c(0, 0.25, 0.50, 0.75, 1),
+      limits = c(0, 1),
+      expand = expansion(mult = c(0, 0.015))
+    ) +
+    labs(
+      x = "Target year",
+      y = "Share captured",
+      title = outcome_label,
+      color = NULL,
+      shape = NULL
+    ) +
+    theme_classic(base_size = 11) +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, hjust = 0),
+      axis.title = element_text(size = 11),
+      axis.text = element_text(size = 9.5),
+      legend.position = "bottom"
+    )
+}
+
+p_cases <- make_capture_panel(plot_data, "Reported cases")
+p_deaths <- make_capture_panel(plot_data, "Reported deaths")
+
+rolling_origin_figure <- p_cases | p_deaths
+rolling_origin_figure <- rolling_origin_figure +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(tag_levels = "A") &
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.key.width = grid::unit(1.8, "lines"),
+    plot.tag = element_text(face = "bold", size = 13)
+  )
+
+rolling_origin_figure
+```
+
+# 9. Compact reporting table
+
+```{r reporting-table}
+reporting_table <- yearly_performance %>%
+  mutate(
+    cases_capture_pct = 100 * cases_capture_share,
+    deaths_capture_pct = 100 * deaths_capture_share
+  ) %>%
+  select(
+    target_year,
+    rule,
+    n_selected,
+    cases_captured,
+    cases_total,
+    cases_capture_pct,
+    deaths_captured,
+    deaths_total,
+    deaths_capture_pct
+  )
+
+print(reporting_table, n = Inf)
+```
+
+# 10. Save scoring outputs
+
+```{r save-outputs}
+readr::write_csv(
+  yearly_performance,
+  file.path(
+    score_dir,
+    "rolling_origin_yearly_performance_2017_2025.csv"
+  )
+)
+
+readr::write_csv(
+  performance_summary,
+  file.path(
+    score_dir,
+    "rolling_origin_performance_summary_2017_2025.csv"
+  )
+)
+
+readr::write_csv(
+  reporting_table,
+  file.path(
+    score_dir,
+    "rolling_origin_reporting_table_2017_2025.csv"
+  )
+)
+
+ggsave(
+  file.path(
+    score_dir,
+    "rolling_origin_capture_2017_2025.png"
+  ),
+  rolling_origin_figure,
+  width = 9.2,
+  height = 4.4,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(
+    score_dir,
+    "rolling_origin_capture_2017_2025.pdf"
+  ),
+  rolling_origin_figure,
+  width = 9.2,
+  height = 4.4,
+  device = grDevices::pdf,
+  family = "sans"
+)
+
+cat("\nSaved scoring outputs to:\n", score_dir, "\n")
+```
+
+# 11. Final checks
+
+```{r final-checks}
+stopifnot(
+  n_distinct(yearly_performance$target_year) == 9L,
+  all(sort(unique(yearly_performance$target_year)) == TARGET_YEARS),
+  nrow(yearly_performance) == 27L,
+  all(yearly_performance$n_selected == TOP_N),
+  all(
+    yearly_performance$cases_capture_share >= 0 &
+      yearly_performance$cases_capture_share <= 1
+  ),
+  all(
+    yearly_performance$deaths_capture_share >= 0 &
+      yearly_performance$deaths_capture_share <= 1
+  )
+)
+
+cat("\nROLLING-ORIGIN SCORING COMPLETE\n")
+cat("Years scored:", paste(TARGET_YEARS, collapse = ", "), "\n")
+cat("Rules compared: rolling-origin forecast, age-only, last-year cases\n")
+cat("Matched municipalities selected per rule:", TOP_N, "of", EXPECTED_N_MUNI, "\n")
+```
+
+# Interpretation guardrails
+
+- Each rolling-origin forecast is evaluated only against a year that was not used as an observed response in that fold.
+- The age-only and last-year-case baselines use only information available before the target year.
+- Capture shares are descriptive held-out performance measures; they are not estimates of vaccine effectiveness or prevented cases/deaths.
+- The dotted 33.3% line is a visual reference for equal random coverage, not a fourth fitted comparison rule.
+- This file scores the primary one-year-ahead rolling-origin analysis only. The longer-horizon 2016-2022 to 2024-2025 analysis and the 2026 external validation remain separate analyses.
+
+Summary Stats
+```{r}
+
+# Numbers needed for manuscript Results
+
+cat("\n=== FULL PERFORMANCE SUMMARY ===\n")
+performance_summary %>%
+  dplyr::select(
+    rule,
+    median_cases_capture,
+    q25_cases_capture,
+    q75_cases_capture,
+    min_cases_capture,
+    max_cases_capture,
+    median_deaths_capture,
+    q25_deaths_capture,
+    q75_deaths_capture,
+    min_deaths_capture,
+    max_deaths_capture
+  ) %>%
+  print(width = Inf)
+
+cat("\n=== YEAR-BY-YEAR CASES + DEATHS ===\n")
+yearly_performance %>%
+  dplyr::select(
+    target_year,
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  print(n = Inf, width = Inf)
+
+cat("\n=== ROLLING FORECAST VS LAST-YEAR CASES ===\n")
+
+comparison_by_year <- yearly_performance %>%
+  dplyr::select(
+    target_year,
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = rule,
+    values_from = c(
+      cases_capture_share,
+      deaths_capture_share
+    )
+  ) %>%
+  dplyr::mutate(
+    case_gain =
+      `cases_capture_share_Rolling-origin forecast` -
+      `cases_capture_share_Last-year cases`,
+    death_gain =
+      `deaths_capture_share_Rolling-origin forecast` -
+      `deaths_capture_share_Last-year cases`
+  )
+
+comparison_by_year %>%
+  dplyr::select(
+    target_year,
+    case_gain,
+    death_gain
+  ) %>%
+  print(n = Inf, width = Inf)
+
+cat("\n=== WIN COUNTS ===\n")
+
+cat(
+  "Cases: rolling-origin better in",
+  sum(comparison_by_year$case_gain > 0, na.rm = TRUE),
+  "of",
+  nrow(comparison_by_year),
+  "years\n"
+)
+
+cat(
+  "Deaths: rolling-origin better in",
+  sum(comparison_by_year$death_gain > 0, na.rm = TRUE),
+  "of",
+  nrow(comparison_by_year),
+  "years\n"
+)
+
+cat("\n=== MEDIAN GAINS VS LAST-YEAR CASES ===\n")
+
+cat(
+  "Median case gain:",
+  median(comparison_by_year$case_gain, na.rm = TRUE),
+  "\n"
+)
+
+cat(
+  "Median death gain:",
+  median(comparison_by_year$death_gain, na.rm = TRUE),
+  "\n"
+)
+
+
+```
+
+```{r}
+
+
+
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(scales)
+
+# ============================================================
+# 1. Rebuild plotting data from the ORIGINAL results
+# ============================================================
+
+stopifnot(exists("yearly_performance"))
+
+cols <- c(
+  "Rolling-origin forecast" = "#2477B4",
+  "Last-year cases" = "#E47D39",
+  "Age-only" = "#16A085"
+)
+
+main_long <- yearly_performance %>%
+  mutate(rule = trimws(as.character(rule))) %>%
+  select(
+    target_year,
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  pivot_longer(
+    cols = c(cases_capture_share, deaths_capture_share),
+    names_to = "outcome",
+    values_to = "capture_share"
+  ) %>%
+  mutate(
+    rule = factor(rule, levels = names(cols))
+  )
+
+stopifnot(
+  nrow(main_long) == 54,
+  !anyNA(main_long$rule),
+  !anyNA(main_long$capture_share)
+)
+
+theme_fig6 <- theme_classic(
+  base_size = 11,
+  base_family = "Helvetica"
+) +
+  theme(
+    plot.title = element_blank(),
+    plot.subtitle = element_blank(),
+    plot.tag = element_text(face = "bold", size = 12),
+    axis.text = element_text(size = 9),
+    axis.title = element_text(size = 10),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 9),
+    plot.margin = margin(8, 10, 5, 8)
+  )
+
+# ============================================================
+# 2. Main performance curves
+# ============================================================
+
+make_main <- function(outcome_name, panel_tag, y_label) {
+
+  main_long %>%
+    filter(outcome == outcome_name) %>%
+    ggplot(aes(
+      x = target_year,
+      y = capture_share,
+      color = rule,
+      group = rule
+    )) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2.2) +
+    scale_color_manual(
+      values = cols,
+      breaks = names(cols),
+      drop = FALSE
+    ) +
+    scale_x_continuous(breaks = 2017:2025) +
+    scale_y_continuous(
+      limits = c(0, 1),
+      breaks = seq(0, 1, 0.25),
+      labels = percent_format(accuracy = 1)
+    ) +
+    labs(
+      x = NULL,
+      y = y_label,
+      tag = panel_tag
+    ) +
+    theme_fig6 +
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+}
+
+p_main_cases <- make_main(
+  "cases_capture_share",
+  "a",
+  "Share of cases captured"
+)
+
+p_main_deaths <- make_main(
+  "deaths_capture_share",
+  "b",
+  "Share of deaths captured"
+)
+
+# ============================================================
+# 3. Forecast advantage in percentage points
+# ============================================================
+
+delta_data <- main_long %>%
+  filter(
+    rule %in% c(
+      "Rolling-origin forecast",
+      "Last-year cases"
+    )
+  ) %>%
+  mutate(rule = as.character(rule)) %>%
+  pivot_wider(
+    names_from = rule,
+    values_from = capture_share
+  ) %>%
+  mutate(
+    delta_pp = 100 * (
+      `Rolling-origin forecast` -
+      `Last-year cases`
+    ),
+    direction = if_else(
+      delta_pp >= 0,
+      "Forecast higher",
+      "Last-year higher"
+    )
+  )
+
+make_delta <- function(outcome_name) {
+
+  delta_data %>%
+    filter(outcome == outcome_name) %>%
+    ggplot(aes(
+      x = target_year,
+      y = delta_pp,
+      fill = direction
+    )) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed",
+      color = "grey50",
+      linewidth = 0.4
+    ) +
+    geom_col(width = 0.65) +
+    scale_fill_manual(
+      values = c(
+        "Forecast higher" = "#2477B4",
+        "Last-year higher" = "#E47D39"
+      ),
+      guide = "none"
+    ) +
+    scale_x_continuous(breaks = 2017:2025) +
+    scale_y_continuous(
+      limits = c(-12, 12),
+      breaks = c(-10, -5, 0, 5, 10),
+      labels = function(x) {
+        ifelse(x > 0, paste0("+", x), as.character(x))
+      }
+    ) +
+    labs(
+      x = "Target year",
+      y = "Forecast − last-year difference"
+    ) +
+    theme_fig6
+}
+
+p_delta_cases <- make_delta("cases_capture_share")
+p_delta_deaths <- make_delta("deaths_capture_share")
+
+# ============================================================
+# 4. Final Figure 6
+# ============================================================
+
+fig6_improved <- (
+  (p_main_cases | p_main_deaths) /
+  (p_delta_cases | p_delta_deaths)
+) +
+  plot_layout(
+    heights = c(1.65, 1),
+    guides = "collect"
+  ) &
+  theme(legend.position = "bottom")
+
+print(fig6_improved)
+
+
+```
+
+
+
+
+# Interpretation guardrails
+
+- Each rolling-origin forecast is evaluated only against a year that was not used as an observed response in that fold.
+- The age-only and last-year-case baselines use only information available before the target year.
+- Capture shares are descriptive held-out performance measures; they are not estimates of vaccine effectiveness or prevented cases/deaths.
+- The dotted 33.3% line is a visual reference for equal random coverage, not a fourth fitted comparison rule.
+- This file scores the primary one-year-ahead rolling-origin analysis only. The longer-horizon 2016-2022 to 2024-2025 analysis and the 2026 external validation remain separate analyses.

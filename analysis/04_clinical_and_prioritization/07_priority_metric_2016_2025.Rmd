@@ -1,0 +1,643 @@
+---
+title: "07 - Priority Metric, Figure 2, and Supp9 Follow-up (2016-2025 Revision)"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+# Assumes st_rate_chik_region from the revised 06 model (2016-2025)
+# Assumes Chik_total from the revised 01 data import (2016-2025, confirmed CHIK only)
+# Assumes pop_panel_total, pop_panel_age from 02_population_panel.R
+```
+
+## Standalone inputs
+
+```{r load-standalone-inputs}
+# ============================================================
+# Standalone input loading
+# 02 is the sole source of population / age denominators.
+# 06 is the sole source of municipality-month posterior IRRs.
+# ============================================================
+
+inla_results_dir <- path.expand("~/Downloads/inla_results")
+
+irr_path <- file.path(
+  inla_results_dir,
+  "st_rate_chik_region_2016_2025.rds"
+)
+
+# Revised Step-02 files are saved in the working/project directory.
+pop_total_path <- "pop_panel_total.rds"
+pop_age_path   <- "pop_panel_age.rds"
+
+required_files <- c(
+  irr_path,
+  pop_total_path,
+  pop_age_path
+)
+
+missing_files <- required_files[!file.exists(required_files)]
+
+if (length(missing_files) > 0) {
+  stop(
+    "Missing required Step-07 input file(s):\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+st_rate_chik_region <- readRDS(irr_path)
+pop_panel_total     <- readRDS(pop_total_path)
+pop_panel_age       <- readRDS(pop_age_path)
+
+# Standardize municipality codes defensively.
+st_rate_chik_region <- st_rate_chik_region %>%
+  mutate(code_muni = stringr::str_pad(as.character(code_muni), 6, pad = "0"))
+
+pop_panel_total <- pop_panel_total %>%
+  mutate(code_muni = stringr::str_pad(as.character(code_muni), 6, pad = "0"))
+
+pop_panel_age <- pop_panel_age %>%
+  mutate(code_muni = stringr::str_pad(as.character(code_muni), 6, pad = "0"))
+
+cat("\n=== STANDALONE INPUT CHECK ===\n")
+cat("IRR rows:", nrow(st_rate_chik_region), "\n")
+cat("IRR municipalities:", dplyr::n_distinct(st_rate_chik_region$code_muni), "\n")
+cat("Population municipality-years:", nrow(pop_panel_total), "\n")
+cat("Age-panel municipality-years:",
+    dplyr::n_distinct(paste(pop_panel_age$code_muni, pop_panel_age$year)), "\n")
+
+stopifnot(
+  nrow(st_rate_chik_region) == 668400L,
+  dplyr::n_distinct(st_rate_chik_region$code_muni) == 5570L,
+  sum(is.na(st_rate_chik_region$IRR)) == 0L,
+  nrow(pop_panel_total) == 55700L,
+  dplyr::n_distinct(pop_panel_total$code_muni) == 5570L,
+  dplyr::n_distinct(pop_panel_age$code_muni) == 5570L
+)
+
+cat("PASS: standalone Step-07 inputs loaded successfully.\n")
+```
+
+
+> **2026 revision note.** The upstream INLA model now covers all 5,570
+> Brazilian municipalities for 2016–2025, including municipality-months
+> with zero reported cases. This script therefore treats 5,570 as a hard
+> coverage requirement. Any join that reduces the priority framework below
+> 5,570 stops execution instead of silently dropping municipalities.
+>
+> **This file is the current bivariate-tertile version of the priority
+> map (Steps 9-13).** Per the plan, this whole approach is being
+> replaced/rehabilitated: the tertile scheme itself is not defensible as
+> the final claim (S9 caption shows it collapses to an age-only rule at
+> matched coverage), and the target is a continuous expected-burden
+> metric (Step 11, Metric A = 18-59 eligible / Metric B = 60+ excluded)
+> with the zone map demoted to a communication layer derived *from* that
+> metric (Step 13). None of that rebuild is in this file yet -- this is
+> the pre-revision version, kept intact so the rebuild has a clear
+> starting point and the Supp9 capture-curve logic (which the rebuild
+> reuses) is preserved.
+
+## Age structure from IBGE table 9514 (65+ share by municipality)
+
+```{r age-structure-from-pop-panel}
+# Uses pop_panel_age
+# (from 02_population_panel.R), computing prop_65plus per municipality
+# as the average over each window's own years, matching how
+# pop_export_recent/pop_export_cum already handle total population.
+# Step 02 is the sole source of population and age denominators.
+# Here we only derive the annual 65+ proportion needed by Figure 2.
+age65_by_year <- pop_panel_age %>%
+  filter(age >= 65) %>%
+  group_by(code_muni, year) %>%
+  summarise(pop_65plus = sum(pop, na.rm = TRUE), .groups = "drop") %>%
+  left_join(
+    pop_panel_total %>% select(code_muni, year, total_pop),
+    by = c("code_muni", "year")
+  ) %>%
+  mutate(prop_65plus = pop_65plus / total_pop)
+
+stopifnot(
+  nrow(age65_by_year) == 5570L * 10L,
+  !anyDuplicated(age65_by_year[c("code_muni", "year")]),
+  sum(is.na(age65_by_year$prop_65plus)) == 0
+)
+
+# Window summaries of the annual Step-02 values; these are not a
+# separate age-structure dataset.
+summarise_age_window <- function(years) {
+  age65_by_year %>%
+    filter(year %in% years) %>%
+    group_by(code_muni) %>%
+    summarise(
+      prop_65plus = mean(prop_65plus, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+age_struct_recent <- summarise_age_window(2024:2025)
+age_struct_cum    <- summarise_age_window(2016:2025)
+
+cat("age_struct_recent municipalities:", nrow(age_struct_recent), "\n")
+cat("age_struct_cum municipalities:", nrow(age_struct_cum), "\n")
+
+```
+
+## Build municipality-level IRR + age structure + region
+
+```{r build-mun-data}
+# Population is the window-matched average from pop_panel_total: each
+# window (2024-25 vs 2016-25) gets its own average population over the
+# years it actually covers.
+make_pop_export <- function(years) {
+  pop_panel_total %>%
+    filter(year %in% years) %>%
+    group_by(code_muni) %>%
+    summarise(total_pop = mean(total_pop, na.rm = TRUE), .groups = "drop")
+}
+
+pop_export_recent <- make_pop_export(2024:2025)
+pop_export_cum    <- make_pop_export(2016:2025)
+
+irr_2024_25 <- st_rate_chik_region %>%
+  filter(year(ym_date) %in% c(2024, 2025)) %>%
+  group_by(code_muni) %>%
+  summarise(mean_irr_2024_25 = mean(IRR, na.rm = TRUE), .groups = "drop")
+
+irr_2016_25 <- st_rate_chik_region %>%
+  filter(year(ym_date) %in% 2016:2025) %>%
+  group_by(code_muni) %>%
+  summarise(mean_irr_2016_25 = mean(IRR, na.rm = TRUE), .groups = "drop")
+
+posterior_irr <- irr_2024_25 %>% left_join(irr_2016_25, by = "code_muni")
+
+nrow(posterior_irr)
+summary(posterior_irr$mean_irr_2024_25)
+
+state_region_fig2 <- tibble(
+  code_state = sprintf("%02d", c(11,12,13,14,15,16,17,
+                                  21,22,23,24,25,26,27,28,29,
+                                  31,32,33,35,
+                                  41,42,43,
+                                  50,51,52,53)),
+  name_region = c(rep("North", 7), rep("Northeast", 9), rep("Southeast", 4),
+                  rep("South", 3), rep("Central-West", 4))
+)
+
+build_mun_data <- function(irr_col, window_label, pop_export, age_struct_window) {
+  posterior_irr %>%
+    select(code_muni, irr = all_of(irr_col)) %>%
+    left_join(age_struct_window %>% select(code_muni, prop_65plus), by = "code_muni") %>%
+    left_join(pop_export, by = "code_muni") %>%
+    mutate(window = window_label, code_state = substr(code_muni, 1, 2)) %>%
+    left_join(state_region_fig2, by = "code_state") %>%
+    filter(!is.na(irr), !is.na(prop_65plus))
+}
+
+mun_data_recent <- build_mun_data("mean_irr_2024_25", "2024_2025", pop_export_recent, age_struct_recent)
+mun_data_cum    <- build_mun_data("mean_irr_2016_25", "2016_2025", pop_export_cum, age_struct_cum)
+
+cat("\n=== Municipality coverage check ===\n")
+cat("Posterior municipalities (2024-25):", nrow(irr_2024_25), "\n")
+cat("Posterior municipalities (2016-25):", nrow(irr_2016_25), "\n")
+cat("Age-structure municipalities (2024-25):", nrow(age_struct_recent), "\n")
+cat("Population municipalities (2024-25):", nrow(pop_export_recent), "\n")
+cat("Final priority-framework municipalities:", nrow(mun_data_recent), "\n")
+
+# Step 4 revision:
+# The revised 06 model uses the complete 5,570-municipality panel,
+# including municipalities with zero reported cases. The priority
+# framework must therefore also retain all 5,570 municipalities.
+expected_n_muni <- 5570L
+
+if (nrow(mun_data_recent) != expected_n_muni) {
+  missing_from_priority <- tibble(
+    code_muni = unique(st_rate_chik_region$code_muni)
+  ) %>%
+    anti_join(mun_data_recent %>% select(code_muni), by = "code_muni")
+
+  print(missing_from_priority)
+
+  stop(
+    "Priority framework contains ", nrow(mun_data_recent),
+    " municipalities, not 5,570. Do not continue: inspect IRR, ",
+    "population, and age-structure joins above."
+  )
+}
+
+stopifnot(
+  n_distinct(irr_2024_25$code_muni) == expected_n_muni,
+  n_distinct(irr_2016_25$code_muni) == expected_n_muni,
+  n_distinct(age_struct_recent$code_muni) == expected_n_muni,
+  n_distinct(age_struct_cum$code_muni) == expected_n_muni,
+  n_distinct(pop_export_recent$code_muni) == expected_n_muni,
+  n_distinct(pop_export_cum$code_muni) == expected_n_muni,
+  n_distinct(mun_data_recent$code_muni) == expected_n_muni,
+  n_distinct(mun_data_cum$code_muni) == expected_n_muni
+)
+cat("PASS: all 5,570 Brazilian municipalities retained in both revised priority windows.\n")
+```
+
+## Tertile binning and Figure 2 panels
+
+```{r tertile-binning}
+bin_tertiles <- function(d) {
+  d %>% mutate(inc_bin = ntile(irr, 3), age_bin = ntile(prop_65plus, 3),
+               bi_class = paste(inc_bin, age_bin, sep = "-"))
+}
+
+mun_data_recent <- bin_tertiles(mun_data_recent)
+mun_data_cum    <- bin_tertiles(mun_data_cum)
+
+tertile_cuts <- mun_data_recent %>%
+  summarise(irr_t1 = quantile(irr, 1/3, na.rm = TRUE), irr_t2 = quantile(irr, 2/3, na.rm = TRUE),
+            age_t1 = quantile(prop_65plus, 1/3, na.rm = TRUE), age_t2 = quantile(prop_65plus, 2/3, na.rm = TRUE))
+print(tertile_cuts)
+
+# Tertile thresholds and zone counts are recalculated from the full
+# 5,570-municipality revised framework. Do not reuse the old 3,879-based
+# thresholds or municipality counts in the manuscript.
+
+three_tone_pal <- c(
+  "1-1" = "#EDEAE0", "2-1" = "#B5D4F4", "3-1" = "#185FA5",
+  "1-2" = "#E5BBAE", "2-2" = "#A89BB8", "3-2" = "#5C5598",
+  "1-3" = "#A32D2D", "2-3" = "#7C3D6C", "3-3" = "#3C3489"
+)
+corner_blue   <- "#185FA5"
+corner_red    <- "#A32D2D"
+corner_purple <- "#3C3489"
+
+if (!dir.exists("data")) dir.create("data")
+
+if (!file.exists("data/mun_sf_simplified.rds")) {
+  mun_sf_fig <- read_municipality(year = 2020, simplified = TRUE, showProgress = FALSE) %>%
+    st_transform(4326) %>%
+    mutate(code_muni = str_pad(substr(as.character(code_muni), 1, 6), 6, pad = "0"))
+  saveRDS(mun_sf_fig, "data/mun_sf_simplified.rds")
+} else {
+  mun_sf_fig <- readRDS("data/mun_sf_simplified.rds")
+}
+
+build_panel_a <- function(mun_data, mun_sf, subtitle = "A  Bivariate priority map") {
+  map_data <- mun_sf %>%
+    mutate(code_muni = str_pad(substr(as.character(code_muni), 1, 6), 6, pad = "0")) %>%
+    left_join(mun_data %>% select(code_muni, bi_class), by = "code_muni")
+  ggplot(map_data) +
+    geom_sf(aes(fill = bi_class), color = "grey20", linewidth = 0.01) +
+    scale_fill_manual(values = three_tone_pal, na.value = "white", guide = "none") +
+    labs(subtitle = subtitle) +
+    theme_void(base_size = 10) +
+    theme(plot.subtitle = element_text(face = "bold", margin = margin(b = 4)),
+          plot.background = element_rect(fill = "white", color = NA),
+          panel.background = element_rect(fill = "white", color = NA))
+}
+
+build_legend <- function() {
+  legend_grid <- expand_grid(inc_bin = 1:3, age_bin = 1:3) %>%
+    mutate(bi_class = paste(inc_bin, age_bin, sep = "-"))
+  ggplot(legend_grid, aes(x = inc_bin, y = age_bin, fill = bi_class)) +
+    geom_tile(color = "white", linewidth = 0.6) +
+    scale_fill_manual(values = three_tone_pal, guide = "none") +
+    coord_fixed(clip = "off") +
+    annotate("text", x = 3.6, y = 1, label = "Transmission\ncontrol", color = corner_blue,
+             hjust = 0, size = 2.7, fontface = "bold", lineheight = 0.9) +
+    annotate("text", x = 0.4, y = 3, label = "Clinical\npreparedness", color = corner_red,
+             hjust = 1, size = 2.7, fontface = "bold", lineheight = 0.9) +
+    annotate("text", x = 3.6, y = 3, label = "Both", color = corner_purple, hjust = 0, size = 2.7, fontface = "bold") +
+    labs(x = "Recent IRR ->", y = "% pop >=65 ->") +
+    theme_void(base_size = 8) +
+    theme(axis.title.x = element_text(size = 8, margin = margin(t = 4)),
+          axis.title.y = element_text(size = 8, angle = 90, margin = margin(r = 4)),
+          plot.margin = margin(4, 40, 4, 40))
+}
+
+region_pal <- c("North" = "#1D9E75", "Northeast" = "#D85A30", "Central-West" = "#EF9F27",
+                "Southeast" = "#7F77DD", "South" = "#378ADD")
+
+build_panel_b <- function(mun_data, subtitle = "B  Municipality-level targeting space") {
+  cuts <- mun_data %>%
+    summarise(irr_t2 = quantile(irr, 2/3, na.rm = TRUE), age_t2 = quantile(prop_65plus, 2/3, na.rm = TRUE))
+  ggplot(mun_data, aes(x = irr, y = prop_65plus * 100)) +
+    annotate("rect", xmin = cuts$irr_t2, xmax = Inf, ymin = -Inf, ymax = cuts$age_t2 * 100,
+             fill = corner_blue, alpha = 0.06) +
+    annotate("rect", xmin = -Inf, xmax = cuts$irr_t2, ymin = cuts$age_t2 * 100, ymax = Inf,
+             fill = corner_red, alpha = 0.06) +
+    annotate("rect", xmin = cuts$irr_t2, xmax = Inf, ymin = cuts$age_t2 * 100, ymax = Inf,
+             fill = corner_purple, alpha = 0.10) +
+    geom_vline(xintercept = cuts$irr_t2, linetype = "dashed", color = "grey55", linewidth = 0.3) +
+    geom_hline(yintercept = cuts$age_t2 * 100, linetype = "dashed", color = "grey55", linewidth = 0.3) +
+    geom_point(aes(color = name_region), alpha = 0.5, size = 0.6) +
+    scale_x_log10(name = "Recent IRR (log scale)") +
+    scale_y_continuous(name = "% population >=65 years", labels = function(x) paste0(x, "%")) +
+    scale_color_manual(values = region_pal, name = "Macro-region", breaks = names(region_pal)) +
+    labs(subtitle = subtitle) +
+    theme_minimal(base_size = 10) +
+    theme(plot.subtitle = element_text(face = "bold", margin = margin(b = 4)),
+          panel.grid.minor = element_blank(), legend.position = "bottom", legend.key.size = unit(8, "pt")) +
+    guides(color = guide_legend(override.aes = list(alpha = 1, size = 2)))
+}
+
+panel_a <- build_panel_a(mun_data_recent, mun_sf_fig)
+legend  <- build_legend()
+panel_b <- build_panel_b(mun_data_recent)
+
+fig2_recent <- (panel_a / legend + plot_layout(heights = c(3, 1))) | panel_b
+print(fig2_recent)
+
+panel_a_cum <- build_panel_a(mun_data_cum, mun_sf_fig)
+panel_b_cum <- build_panel_b(mun_data_cum)
+fig2_cum <- (panel_a_cum / legend + plot_layout(heights = c(3, 1))) | panel_b_cum
+print(fig2_cum)
+
+print(tertile_cuts)
+
+policy_by_region <- mun_data_recent %>%
+  group_by(name_region) %>%
+  summarise(n_total = n(),
+            n_transmission = sum(inc_bin == 3 & age_bin < 3),
+            n_preparedness = sum(inc_bin < 3 & age_bin == 3),
+            n_both = sum(inc_bin == 3 & age_bin == 3), .groups = "drop")
+print(policy_by_region)
+
+zone_counts <- mun_data_recent %>%
+  summarise(
+    n_total = n(),
+    n_transmission = sum(inc_bin == 3 & age_bin < 3),
+    n_preparedness = sum(inc_bin < 3 & age_bin == 3),
+    n_both = sum(inc_bin == 3 & age_bin == 3),
+    n_intermediate = sum(!(inc_bin == 3 & age_bin < 3) &
+                         !(inc_bin < 3 & age_bin == 3) &
+                         !(inc_bin == 3 & age_bin == 3))
+  )
+
+print(zone_counts)
+
+cat("\n=== Revised Figure 6 quantities ===\n")
+cat("Municipalities:", nrow(mun_data_recent), "\n")
+cat("IRR tertile cut-points:",
+    round(tertile_cuts$irr_t1, 4), "and",
+    round(tertile_cuts$irr_t2, 4), "\n")
+cat("Age 65+ tertile cut-points:",
+    round(100 * tertile_cuts$age_t1, 2), "% and",
+    round(100 * tertile_cuts$age_t2, 2), "%\n")
+print(zone_counts)
+```
+
+## Case fatality rate by macro-region and epidemic window
+
+```{r cfr-by-macroregion}
+cfr_region <- Chik_total %>%
+  mutate(year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
+         code_state = substr(as.character(ID_MUNICIP), 1, 2),
+         HOSPITALIZ = as.character(HOSPITALIZ)) %>%
+  filter(CLASSI_FIN %in% c(1, 13), HOSPITALIZ == "1") %>%
+  left_join(state_region_lookup, by = "code_state") %>%   # from 06_inla_spacetime_model.Rmd
+  filter(!is.na(region)) %>%
+  mutate(epidemic = case_when(
+    year %in% 2016:2017 ~ "Epidemic 1 (2016-2017)",
+    year %in% 2024:2025 ~ "Epidemic 2 (2024-2025)",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(epidemic)) %>%
+  group_by(region, epidemic) %>%
+  summarise(hosp_confirmed = n(), deaths = sum(EVOLUCAO == 2, na.rm = TRUE),
+            CFR_pct = round(deaths / hosp_confirmed * 100, 2), .groups = "drop")
+
+print(cfr_region)
+
+# NOTE (Step 10): Table S5 currently compares these two windows with no
+# formal statistic -- Step 10 replaces this with a shared component
+# model (Knorr-Held/Best) quantifying spatial concordance with a
+# credible interval across the whole 2016-2025 period, not just an
+# eyeball comparison of two epidemic windows.
+```
+
+## Supp9 follow-up: cumulative-capture curves (Metric A vs age-only vs framework zones)
+
+This is the block underlying the S9 caption finding that motivated the
+whole revision: at matched coverage, the clinical-preparedness/combined
+zones select the same municipalities as an age-only rule.
+
+```{r supp9-muni-df}
+cases_2425_muni <- Chik_total %>%
+  mutate(year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
+         code_muni = str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0")) %>%
+  filter(CLASSI_FIN %in% c(1, 13), year %in% c(2024, 2025)) %>%
+  count(code_muni, name = "cases_2425")
+
+deaths_65plus_muni <- Chik_total %>%
+  mutate(year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
+         code_muni = str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0"),
+         age_years = decode_age_years(NU_IDADE_N)) %>%    # from 01_data_import_cleaning.Rmd
+  filter(EVOLUCAO == 2, year %in% c(2024, 2025), !is.na(age_years), age_years >= 65) %>%
+  count(code_muni, name = "deaths_65plus")
+
+muni_df <- mun_data_recent %>%
+  transmute(
+    code_muni,
+    irr_2425 = irr,
+    prop_65 = prop_65plus,
+    pop_total = total_pop,
+    pop_65plus = prop_65plus * total_pop,
+    zone = case_when(
+      inc_bin == 3 & age_bin < 3 ~ "transmission-control",
+      inc_bin < 3 & age_bin == 3 ~ "clinical-preparedness",
+      inc_bin == 3 & age_bin == 3 ~ "combined",
+      TRUE ~ "neither"
+    )
+  ) %>%
+  left_join(cases_2425_muni, by = "code_muni") %>%
+  left_join(deaths_65plus_muni, by = "code_muni") %>%
+  mutate(
+    cases_2425 = replace_na(cases_2425, 0),
+    deaths_65plus = replace_na(deaths_65plus, 0)
+  )
+
+stopifnot(
+  nrow(muni_df) == 5570L,
+  n_distinct(muni_df$code_muni) == 5570L,
+  sum(is.na(muni_df$pop_65plus)) == 0L
+)
+
+cat("PASS: Supp9 municipality dataset contains all 5,570 municipalities.\n")
+
+cat("\n=== Supp9 municipality coverage ===\n")
+cat("Rows:", nrow(muni_df), "\n")
+cat("Unique municipalities:", n_distinct(muni_df$code_muni), "\n")
+print(colSums(is.na(muni_df)))
+
+stopifnot(
+  nrow(muni_df) == expected_n_muni,
+  n_distinct(muni_df$code_muni) == expected_n_muni,
+  sum(is.na(muni_df$pop_65plus)) == 0,
+  sum(is.na(muni_df$pop_total)) == 0
+)
+
+cat("PASS: Supp9 also retains all 5,570 municipalities.\n")
+```
+
+```{r supp9-capture-share}
+total_2425 <- sum(muni_df$cases_2425)
+
+cases_left <- muni_df %>%
+  filter(prop_65 < quantile(prop_65, 2/3)) %>%
+  summarise(pct_cases_left = 100 * sum(cases_2425) / total_2425)
+
+cat("\n=== Cases left unprioritised by age-only ===\n")
+cat(sprintf("Cases in municipalities age-only would not prioritise: %.1f%%\n", cases_left$pct_cases_left))
+
+muni_df <- muni_df %>% mutate(age_only_selected = prop_65 >= quantile(prop_65, 2/3))
+
+muni_df <- muni_df %>% mutate(hi_sev_py = pop_65plus)
+total <- sum(muni_df$hi_sev_py)
+zone_capture_pop <- muni_df %>% filter(zone %in% c("clinical-preparedness", "combined")) %>%
+  summarise(pct = 100 * sum(hi_sev_py) / total)
+age_only_capture_pop <- muni_df %>% filter(age_only_selected) %>%
+  summarise(pct = 100 * sum(hi_sev_py) / total)
+
+muni_df <- muni_df %>% mutate(hi_sev_py = deaths_65plus)
+total <- sum(muni_df$hi_sev_py)
+zone_capture_death <- muni_df %>% filter(zone %in% c("clinical-preparedness", "combined")) %>%
+  summarise(pct = 100 * sum(hi_sev_py) / total)
+age_only_capture_death <- muni_df %>% filter(age_only_selected) %>%
+  summarise(pct = 100 * sum(hi_sev_py) / total)
+
+cat("\n=== Severity capture at equal coverage ===\n")
+cat(sprintf("n age-only selected (upper tertile): %d\n", sum(muni_df$age_only_selected)))
+cat("\n-- Weight A: 65+ population --\n")
+cat(sprintf("framework (prep+combined): %.1f%%\n", zone_capture_pop$pct))
+cat(sprintf("age-only (upper tertile):  %.1f%%\n", age_only_capture_pop$pct))
+cat("\n-- Weight B: observed 65+ deaths (2024-25) --\n")
+cat(sprintf("framework (prep+combined): %.1f%%\n", zone_capture_death$pct))
+cat(sprintf("age-only (upper tertile):  %.1f%%\n", age_only_capture_death$pct))
+
+muni_df <- muni_df %>% select(-hi_sev_py, -age_only_selected)
+
+# THIS is the S9 finding in numbers: if zone_capture and age_only_capture
+# are close, the severity axis is adding little beyond an age-only rule
+# -- the exact problem Step 11's Metric A/B rebuild is meant to fix.
+```
+
+```{r supp9-cumulative-curves}
+make_curve <- function(df, order_var, label) {
+  df %>%
+    arrange(desc(.data[[order_var]])) %>%
+    transmute(strategy = label, n_muni = row_number(), cov_frac = n_muni / n(),
+              cum_cases = cumsum(cases_2425) / sum(cases_2425),
+              cum_sev = cumsum(pop_65plus) / sum(pop_65plus))
+}
+
+curves <- bind_rows(
+  make_curve(muni_df, "irr_2425", "Prioritise by transmission (2024-25 IRR)"),
+  make_curve(muni_df, "prop_65",  "Age-only (% aged 65+)")
+)
+
+k <- round(nrow(muni_df) / 3)
+headline <- curves %>% filter(n_muni == k)
+
+age_cases  <- headline$cum_cases[grepl("Age-only", headline$strategy)]
+rule_cases <- headline$cum_cases[grepl("transmission", headline$strategy)]
+
+cat("\n=== Capture at matched coverage (k =", k, ") ===\n")
+cat(sprintf("Transmission ranking captures: %.0f%% of 2024-25 cases\n", 100 * rule_cases))
+cat(sprintf("Age-only ranking captures:     %.0f%% of 2024-25 cases\n", 100 * age_cases))
+cat(sprintf("Age-only leaves unprioritised: %.0f%% of 2024-25 cases\n", 100 * (1 - age_cases)))
+
+plot_df <- curves %>%
+  pivot_longer(c(cum_cases, cum_sev), names_to = "axis", values_to = "captured") %>%
+  mutate(axis = recode(axis, cum_cases = "A  2024-25 cases captured", cum_sev = "B  Population aged 65+ captured"))
+
+ggplot(plot_df, aes(cov_frac, captured, colour = strategy)) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = 3,
+    colour = "grey70"
+  ) +
+  geom_vline(
+    xintercept = 1/3,
+    linetype = 2,
+    colour = "grey60"
+  ) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~axis) +
+  scale_x_continuous(
+    labels = percent,
+    limits = c(0, 1),
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    labels = percent,
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  scale_colour_manual(
+    values = c(
+      `Prioritise by transmission (2024-25 IRR)` = "#2c7fb8",
+      `Age-only (% aged 65+)` = "#d95f0e"
+    )
+  ) +
+  labs(
+    x = "Municipalities prioritised (cumulative %, ranked by each strategy)",
+    y = "Cumulative share captured",
+    colour = NULL,
+    caption = paste0(
+      "Dashed vertical line = matched coverage (upper tertile, n = ",
+      k,
+      "). Dotted diagonal = line of equality."
+    )
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(1.2, "lines"),
+    strip.text = element_text(
+      hjust = 0,
+      face = "bold"
+    )
+  )
+```
+
+## Next: Step 11 rebuild (not yet in this file)
+
+The above reproduces the current (pre-revision) tertile framework and
+its Supp9 diagnostic. The Step 11 rebuild -- expected-burden Metric A
+(18-59, currently deployable IXCHIQ) and Metric B (60+, the case for the
+CHIKV VLP product under ANVISA review), propagated posterior uncertainty,
+and the four-rule comparison figure (transmission-only / age-only /
+expected-burden / random) -- is new work to add here, not a
+reorganization of existing code.
+
+
+## Save revised priority-framework outputs
+
+```{r save-priority-outputs}
+# Chunk 10: save-priority-outputs
+
+priority_output_dir <- inla_results_dir
+
+saveRDS(
+  mun_data_recent,
+  file.path(priority_output_dir, "priority_framework_2024_2025.rds")
+)
+
+saveRDS(
+  mun_data_cum,
+  file.path(priority_output_dir, "priority_framework_2016_2025.rds")
+)
+
+readr::write_csv(
+  mun_data_recent,
+  file.path(priority_output_dir, "priority_framework_2024_2025.csv")
+)
+
+cat(
+  "\nSaved revised Step-07 priority outputs to:\n",
+  priority_output_dir,
+  "\n"
+)
+```

@@ -1,0 +1,410 @@
+---
+title: "09 - Symptom Analysis (Revised 2016-2025)"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+
+# Upstream requirement:
+#   01_data_import_cleaning.Rmd -> Chik_total
+#
+# Revised scope: confirmed chikungunya only, 1 Jan 2016 through 31 Dec 2025.
+# This file is descriptive/supporting analysis only. The symptom figures are
+# intended for the supplement after the revision; they do not define the
+# severity surface or vaccine-allocation metric.
+
+STUDY_START_YEAR <- 2016L
+STUDY_END_YEAR   <- 2025L
+STUDY_START_DATE <- as.Date("2016-01-01")
+STUDY_END_DATE   <- as.Date("2025-12-31")
+STUDY_LABEL      <- "2016-2025"
+SYMPTOM_TREND_START_YEAR <- 2017L
+
+stopifnot(
+  exists("Chik_total"),
+  all(Chik_total$CLASSI_FIN %in% c(1, 13)),
+  all(as.Date(Chik_total$DT_SIN_PRI) >= STUDY_START_DATE),
+  all(as.Date(Chik_total$DT_SIN_PRI) <= STUDY_END_DATE)
+)
+
+symptom_map <- c(
+  FEBRE      = "Fever",
+  MIALGIA    = "Myalgia",
+  CEFALEIA   = "Headache",
+  EXANTEMA   = "Rash",
+  VOMITO     = "Vomiting",
+  NAUSEA     = "Nausea",
+  DOR_COSTAS = "Back pain",
+  ARTRITE    = "Arthritis",
+  ARTRALGIA  = "Arthralgia",
+  DOR_RETRO  = "Retro-orbital pain"
+)
+
+symptom_vars <- names(symptom_map)
+
+chik <- Chik_total %>%
+  mutate(
+    DT_SIN_PRI = as.Date(DT_SIN_PRI),
+    year = lubridate::year(DT_SIN_PRI),
+    age_years = as.numeric(age_years),
+    across(
+      all_of(symptom_vars),
+      ~ dplyr::case_when(
+        as.character(.x) == "1" ~ 1L,
+        as.character(.x) == "2" ~ 0L,
+        TRUE ~ NA_integer_
+      )
+    )
+  )
+```
+
+This revision treats symptom variables as **reported clinical features among
+confirmed cases**, not as population incidence. Missing/unrecorded symptom
+fields are retained as missing rather than being silently coded as absence.
+
+## Overall symptom frequency and recording completeness
+
+```{r symptom-frequency}
+symptom_frequency <- chik %>%
+  summarise(
+    across(
+      all_of(symptom_vars),
+      list(
+        present = ~ sum(.x == 1, na.rm = TRUE),
+        recorded = ~ sum(!is.na(.x)),
+        missing = ~ sum(is.na(.x)),
+        prevalence = ~ mean(.x, na.rm = TRUE)
+      ),
+      .names = "{.col}__{.fn}"
+    )
+  ) %>%
+  pivot_longer(
+    everything(),
+    names_to = c("symptom", ".value"),
+    names_sep = "__"
+  ) %>%
+  mutate(
+    symptom_label = unname(symptom_map[symptom]),
+    prevalence_percent = 100 * prevalence,
+    missing_percent = 100 * missing / nrow(chik)
+  ) %>%
+  arrange(desc(prevalence_percent))
+
+print(symptom_frequency)
+
+p_symptom_frequency <- ggplot(
+  symptom_frequency,
+  aes(x = prevalence_percent, y = reorder(symptom_label, prevalence_percent))
+) +
+  geom_col() +
+  labs(
+    title = paste0("Reported symptom frequency among confirmed chikungunya cases, ", STUDY_LABEL),
+    subtitle = "Denominator for each symptom is cases with that field recorded",
+    x = "Cases reporting symptom (%)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11)
+
+p_symptom_frequency
+```
+
+## Recording completeness by year
+
+```{r symptom-missingness-by-year}
+symptom_missing_year <- chik %>%
+  select(year, all_of(symptom_vars)) %>%
+  pivot_longer(
+    cols = all_of(symptom_vars),
+    names_to = "symptom",
+    values_to = "present"
+  ) %>%
+  group_by(year, symptom) %>%
+  summarise(
+    n_cases = n(),
+    n_recorded = sum(!is.na(present)),
+    missing_percent = 100 * mean(is.na(present)),
+    .groups = "drop"
+  ) %>%
+  mutate(symptom_label = unname(symptom_map[symptom]))
+
+print(symptom_missing_year)
+
+p_symptom_missing <- ggplot(
+  symptom_missing_year,
+  aes(x = year, y = symptom_label, fill = missing_percent)
+) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Missing (%)", option = "C") +
+  scale_x_continuous(breaks = STUDY_START_YEAR:STUDY_END_YEAR) +
+  labs(
+    title = paste0("Symptom-field missingness by year, ", STUDY_LABEL),
+    x = "Year",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank())
+
+p_symptom_missing
+```
+
+## Symptom profile over time
+
+Symptom-field completeness was extremely low in 2016 (approximately 0.9%
+recorded) but was near-complete from 2017 onward. Therefore, all temporal
+symptom analyses are restricted to 2017-2025. The yearly percentages are
+descriptive proportions among cases with the relevant symptom field recorded.
+Logistic time-trend models are retained only as compact diagnostics and are not
+interpreted causally.
+
+```{r symptom-trend-over-time}
+symptom_year <- chik %>%
+  filter(year >= SYMPTOM_TREND_START_YEAR) %>%
+  select(year, all_of(symptom_vars)) %>%
+  pivot_longer(
+    cols = all_of(symptom_vars),
+    names_to = "symptom",
+    values_to = "present"
+  ) %>%
+  filter(!is.na(present)) %>%
+  group_by(year, symptom) %>%
+  summarise(
+    n_recorded = n(),
+    n_present = sum(present == 1),
+    prevalence_percent = 100 * mean(present),
+    .groups = "drop"
+  ) %>%
+  mutate(symptom_label = unname(symptom_map[symptom]))
+
+print(symptom_year)
+
+p_symptom_year <- ggplot(
+  symptom_year,
+  aes(x = year, y = prevalence_percent, group = symptom_label)
+) +
+  geom_line() +
+  geom_point(size = 1.4) +
+  facet_wrap(~ symptom_label, scales = "free_y", ncol = 2) +
+  scale_x_continuous(breaks = SYMPTOM_TREND_START_YEAR:STUDY_END_YEAR) +
+  labs(
+    title = paste0("Reported symptom proportions by year, ",
+                   SYMPTOM_TREND_START_YEAR, "-", STUDY_END_YEAR),
+    subtitle = "2016 excluded from temporal analysis because symptom fields were ~99% missing",
+    x = "Year",
+    y = "Cases reporting symptom (%)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_symptom_year
+
+symptom_trend_models <- purrr::map_dfr(symptom_vars, function(sym) {
+  d <- chik %>%
+    transmute(year, present = .data[[sym]]) %>%
+    filter(
+      year >= SYMPTOM_TREND_START_YEAR,
+      !is.na(present)
+    )
+
+  fit <- glm(present ~ year, data = d, family = binomial())
+  tt <- broom::tidy(fit, conf.int = TRUE, exponentiate = TRUE)
+
+  tt %>%
+    filter(term == "year") %>%
+    transmute(
+      symptom = sym,
+      symptom_label = unname(symptom_map[sym]),
+      odds_ratio_per_year = estimate,
+      conf_low = conf.low,
+      conf_high = conf.high,
+      p_value = p.value,
+      n_recorded = nrow(d)
+    )
+})
+
+print(symptom_trend_models)
+```
+
+## Complete symptom records
+
+For co-occurrence and combination analyses, restrict to cases for which all ten
+symptom fields were recorded. This ensures that a zero means an explicitly
+recorded absence rather than an unrecorded symptom field.
+
+```{r complete-symptom-records}
+complete_symptom_cases <- chik %>%
+  filter(if_all(all_of(symptom_vars), ~ !is.na(.x)))
+
+cat("Cases with all 10 symptom fields recorded:",
+    nrow(complete_symptom_cases), "\n")
+```
+
+## Symptom co-occurrence (supplement)
+
+The UpSet plot is restricted to complete 10-symptom records so that symptom
+absence is not conflated with missingness.
+
+```{r symptom-upset}
+symptom_list <- lapply(
+  symptom_vars,
+  function(sym) which(complete_symptom_cases[[sym]] == 1L)
+)
+names(symptom_list) <- unname(symptom_map[symptom_vars])
+
+upset_input <- UpSetR::fromList(symptom_list)
+
+UpSetR::upset(
+  upset_input,
+  sets = colnames(upset_input),
+  order.by = "freq",
+  nintersects = 40,
+  point.size = 3,
+  line.size = 1,
+  number.angles = 30,
+  sets.x.label = "Complete-record cases reporting symptom",
+  text.scale = 1.3
+)
+```
+
+## Most common fully observed symptom combinations
+
+```{r symptom-combination-table}
+
+combo_df <- complete_symptom_cases %>%
+  count(across(all_of(symptom_vars)), name = "n") %>%
+  mutate(
+    percentage = n / nrow(complete_symptom_cases),
+    percentage_label = paste0(
+      scales::comma(n), " (",
+      scales::percent(percentage, accuracy = 0.1), ")"
+    )
+  ) %>%
+  arrange(desc(n))
+
+cat("Cases with all 10 symptom fields recorded:", nrow(complete_symptom_cases), "\n")
+print(head(combo_df, 25))
+```
+
+## Symptom profile by sex among confirmed cases
+
+These are **within-case symptom proportions**, not population incidence rates.
+No external sex denominator is used because the numerator spans ten years of
+notifications and a single-year census denominator would not represent the
+person-time at risk.
+
+```{r symptom-by-sex}
+symptom_sex <- chik %>%
+  filter(CS_SEXO %in% c("M", "F")) %>%
+  mutate(
+    sex = recode(CS_SEXO, "M" = "Male", "F" = "Female")
+  ) %>%
+  select(sex, all_of(symptom_vars)) %>%
+  pivot_longer(
+    cols = all_of(symptom_vars),
+    names_to = "symptom",
+    values_to = "present"
+  ) %>%
+  filter(!is.na(present)) %>%
+  group_by(sex, symptom) %>%
+  summarise(
+    n_recorded = n(),
+    n_present = sum(present == 1),
+    prevalence_percent = 100 * mean(present),
+    .groups = "drop"
+  ) %>%
+  mutate(symptom_label = unname(symptom_map[symptom]))
+
+print(symptom_sex)
+
+p_symptom_sex <- ggplot(
+  symptom_sex,
+  aes(x = symptom_label, y = prevalence_percent, fill = sex)
+) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(
+    title = paste0("Reported symptom profile by sex, ", STUDY_LABEL),
+    x = NULL,
+    y = "Cases reporting symptom (%)",
+    fill = "Sex"
+  ) +
+  theme_minimal(base_size = 11)
+
+p_symptom_sex
+```
+
+## Symptom profile by age group among confirmed cases
+
+```{r symptom-by-age}
+chik_age <- chik %>%
+  filter(!is.na(age_years), age_years >= 0) %>%
+  mutate(
+    age_group = case_when(
+      age_years < 15 ~ "<15",
+      age_years < 30 ~ "15-29",
+      age_years < 45 ~ "30-44",
+      age_years < 60 ~ "45-59",
+      TRUE ~ ">=60"
+    ),
+    age_group = factor(age_group, levels = c("<15", "15-29", "30-44", "45-59", ">=60"))
+  )
+
+symptom_age <- chik_age %>%
+  select(age_group, all_of(symptom_vars)) %>%
+  pivot_longer(
+    cols = all_of(symptom_vars),
+    names_to = "symptom",
+    values_to = "present"
+  ) %>%
+  filter(!is.na(present)) %>%
+  group_by(age_group, symptom) %>%
+  summarise(
+    n_recorded = n(),
+    n_present = sum(present == 1),
+    prevalence_percent = 100 * mean(present),
+    .groups = "drop"
+  ) %>%
+  mutate(symptom_label = unname(symptom_map[symptom]))
+
+print(symptom_age)
+
+p_symptom_age <- ggplot(
+  symptom_age,
+  aes(x = age_group, y = symptom_label, fill = prevalence_percent)
+) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Cases reporting\nsymptom (%)", option = "C") +
+  labs(
+    title = paste0("Reported symptom profile by age group, ", STUDY_LABEL),
+    x = "Age group",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank())
+
+p_symptom_age
+```
+
+## Scope sanity checks
+
+```{r scope-sanity}
+cat("Study period:", STUDY_LABEL, "\n")
+cat("Confirmed chikungunya cases:", nrow(chik), "\n")
+cat("Years represented:", paste(sort(unique(chik$year)), collapse = ", "), "\n")
+cat("Cases with complete 10-symptom recording:", nrow(complete_symptom_cases), "\n")
+cat("Female/male-coded cases:", sum(chik$CS_SEXO %in% c("F", "M"), na.rm = TRUE), "\n")
+cat("Cases with non-missing age:", sum(!is.na(chik$age_years)), "\n")
+
+stopifnot(
+  nrow(chik) == nrow(Chik_total),
+  min(chik$year, na.rm = TRUE) >= STUDY_START_YEAR,
+  max(chik$year, na.rm = TRUE) <= STUDY_END_YEAR,
+  all(symptom_frequency$recorded + symptom_frequency$missing == nrow(chik)),
+  all(symptom_year$year %in% SYMPTOM_TREND_START_YEAR:STUDY_END_YEAR),
+  min(symptom_year$year) == SYMPTOM_TREND_START_YEAR,
+  n_distinct(chik$year) == length(STUDY_START_YEAR:STUDY_END_YEAR)
+)
+```

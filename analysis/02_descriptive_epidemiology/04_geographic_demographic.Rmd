@@ -1,0 +1,507 @@
+---
+title: "04 - Geographic and Demographic Descriptive Analyses"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+
+# Upstream requirements:
+#   01_data_import_cleaning.Rmd -> Chik_total / combined_all
+#   02_population_panel.R       -> pop_panel_total
+#
+# Revised scope: confirmed chikungunya only, 1 Jan 2016 through 31 Dec 2025.
+STUDY_START_YEAR <- 2016L
+STUDY_END_YEAR   <- 2025L
+STUDY_START_DATE <- as.Date("2016-01-01")
+STUDY_END_DATE   <- as.Date("2025-12-31")
+STUDY_LABEL      <- "2016-2025"
+EXPECTED_N_MUNI  <- 5570L
+
+stopifnot(
+  exists("Chik_total"),
+  exists("pop_panel_total"),
+  all(Chik_total$CLASSI_FIN %in% c(1, 13)),
+  all(as.Date(Chik_total$DT_SIN_PRI) >= STUDY_START_DATE),
+  all(as.Date(Chik_total$DT_SIN_PRI) <= STUDY_END_DATE)
+)
+
+# Chik_total is already the confirmed analytic population. Do not filter on
+# case_status == "Confirmed": file 01 relabels fatal confirmed cases as "Death",
+# so that filter would incorrectly remove deaths from the case denominator.
+chik <- Chik_total %>%
+  mutate(
+    DT_SIN_PRI = as.Date(DT_SIN_PRI),
+    year = lubridate::year(DT_SIN_PRI),
+    code_muni = stringr::str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0"),
+    code_state = substr(code_muni, 1, 2),
+    is_death = EVOLUCAO == 2,
+    is_hosp = as.character(HOSPITALIZ) == "1",
+    # Delay variables are derived locally from the raw SINAN dates so this
+    # file does not depend on objects created inside 03_descriptive_epi.Rmd.
+    report_delay = as.numeric(as.Date(DT_NOTIFIC) - DT_SIN_PRI),
+    hosp_delay   = as.numeric(as.Date(DT_INTERNA) - DT_SIN_PRI),
+    death_delay  = as.numeric(as.Date(DT_OBITO) - DT_SIN_PRI),
+    report_delay = if_else(!is.na(report_delay) & report_delay >= 0, report_delay, NA_real_),
+    hosp_delay   = if_else(!is.na(hosp_delay) & hosp_delay >= 0, hosp_delay, NA_real_),
+    death_delay  = if_else(!is.na(death_delay) & death_delay >= 0, death_delay, NA_real_)
+  )
+```
+
+This file now serves only the revised chikungunya analysis. Zika comparisons
+and the old 2015 observations are intentionally excluded. Geographic incidence
+uses year-matched IBGE municipality population denominators from file 02.
+
+## Spatial reference data
+
+```{r spatial-reference}
+muni_sf <- geobr::read_municipality(year = 2020, showProgress = FALSE) %>%
+  mutate(code_muni = stringr::str_pad(substr(as.character(code_muni), 1, 6), 6, pad = "0")) %>%
+  filter(code_muni %in% unique(pop_panel_total$code_muni))
+
+states_sf <- geobr::read_state(year = 2020, showProgress = FALSE) %>%
+  select(-any_of("year"))
+
+regions_sf <- geobr::read_region(year = 2020, showProgress = FALSE) %>%
+  select(-any_of("year"))
+
+stopifnot(n_distinct(muni_sf$code_muni) == EXPECTED_N_MUNI)
+
+# The spatial universe is fixed to the same 5,570 municipalities used in the
+# revised INLA model and population panel.
+muni_lookup <- muni_sf %>%
+  st_drop_geometry() %>%
+  select(code_muni, name_muni, code_state)
+```
+
+## Municipality-year confirmed incidence
+
+```{r municipality-incidence-panel}
+chik_muni_year <- chik %>%
+  count(year, code_muni, name = "cases")
+
+map_panel <- tidyr::crossing(
+  year = STUDY_START_YEAR:STUDY_END_YEAR,
+  code_muni = muni_sf$code_muni
+) %>%
+  left_join(chik_muni_year, by = c("year", "code_muni")) %>%
+  mutate(cases = tidyr::replace_na(cases, 0L)) %>%
+  left_join(
+    pop_panel_total %>% select(code_muni, year, total_pop),
+    by = c("code_muni", "year")
+  ) %>%
+  mutate(
+    incidence_per_100k = 1e5 * cases / total_pop
+  )
+
+stopifnot(
+  nrow(map_panel) == EXPECTED_N_MUNI * length(STUDY_START_YEAR:STUDY_END_YEAR),
+  !anyDuplicated(map_panel[c("code_muni", "year")]),
+  sum(is.na(map_panel$total_pop)) == 0,
+  all(map_panel$total_pop > 0)
+)
+
+map_data_chik <- muni_sf %>%
+  select(code_muni, geometry) %>%
+  left_join(map_panel, by = "code_muni") %>%
+  st_as_sf()
+```
+
+## Figure 2 candidate: annual municipality incidence maps
+
+```{r annual-incidence-maps}
+# Chunk 4: annual-incidence-maps
+breaks_chik <- c(0, 50, 100, 200, 500, 1000, 2000, 5000, Inf)
+labels_chik <- c(
+  "0-50", "50-100", "100-200", "200-500",
+  "500-1,000", "1,000-2,000", "2,000-5,000", "5,000+"
+)
+
+map_data_chik <- map_data_chik %>%
+  mutate(
+    inc_bin = cut(
+      incidence_per_100k,
+      breaks = breaks_chik,
+      labels = labels_chik,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+  )
+
+chik_cols <- c(
+  "0-50"        = "#FFF5F7",
+  "50-100"      = "#FDE0DD",
+  "100-200"     = "#FCC5C0",
+  "200-500"     = "#FA9FB5",
+  "500-1,000"   = "#F768A1",
+  "1,000-2,000" = "#DD3497",
+  "2,000-5,000" = "#AE017E",
+  "5,000+"      = "#7A0177"
+)
+
+p_chik_muni <- ggplot() +
+  # municipality polygons with thin grey borders
+  geom_sf(
+    data = map_data_chik,
+    aes(fill = inc_bin),
+    color = "grey75",
+    linewidth = 0.0
+  ) +
+  # state borders on top
+  geom_sf(
+    data = states_sf,
+    fill = NA,
+    color = "black",
+    linewidth = 0.1
+  ) +
+  facet_wrap(~ year, ncol = 5) +
+  coord_sf(
+    xlim = c(-74, -28),
+    ylim = c(-34, 6),
+    expand = FALSE
+  ) +
+  scale_fill_manual(
+    values = chik_cols,
+    name = "Confirmed incidence\n(per 100,000)",
+    drop = FALSE,
+    na.value = "grey95"
+  ) +
+  labs(
+    title = paste0("Confirmed chikungunya incidence by municipality, Brazil, ", STUDY_LABEL)
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    strip.text = element_text(face = "bold"),
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8)
+  )
+
+p_chik_muni
+```
+
+Interpretation should use **confirmed/reported incidence** for these descriptive
+maps. Reserve stronger "transmission intensity" language for model-based
+quantities from the INLA analysis.
+
+## Macro-region descriptive summaries
+
+```{r macro-region-summary}
+muni_region <- muni_sf %>%
+  st_drop_geometry() %>%
+  transmute(
+    code_muni,
+    code_state = stringr::str_pad(substr(as.character(code_state), 1, 2), 2, pad = "0")
+  ) %>%
+  left_join(state_region_lookup, by = "code_state")
+
+stopifnot(sum(is.na(muni_region$region)) == 0)
+
+region_pop_year <- pop_panel_total %>%
+  left_join(muni_region, by = "code_muni") %>%
+  group_by(year, region) %>%
+  summarise(population = sum(total_pop, na.rm = TRUE), .groups = "drop")
+
+region_cases_year <- chik %>%
+  left_join(muni_region %>% select(code_muni, region), by = "code_muni") %>%
+  group_by(year, region) %>%
+  summarise(
+    cases = n(),
+    deaths = sum(is_death, na.rm = TRUE),
+    hospitalized = sum(is_hosp, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+region_summary <- tidyr::crossing(
+  year = STUDY_START_YEAR:STUDY_END_YEAR,
+  region = unique(state_region_lookup$region)
+) %>%
+  left_join(region_cases_year, by = c("year", "region")) %>%
+  left_join(region_pop_year, by = c("year", "region")) %>%
+  mutate(
+    across(c(cases, deaths, hospitalized), ~ tidyr::replace_na(.x, 0L)),
+    incidence_per_100k = 1e5 * cases / population,
+    # Descriptive case-based quantity only; not the revised severity surface.
+    CFR_percent = 100 * deaths / cases
+  )
+
+print(region_summary)
+
+p_region_incidence <- ggplot(region_summary, aes(x = year, y = incidence_per_100k, group = region)) +
+  geom_line(aes(linetype = region), linewidth = 0.8) +
+  geom_point(aes(shape = region), size = 2) +
+  scale_x_continuous(breaks = STUDY_START_YEAR:STUDY_END_YEAR) +
+  labs(
+    title = paste0("Confirmed chikungunya incidence by macro-region, ", STUDY_LABEL),
+    x = "Year", y = "Confirmed incidence per 100,000",
+    linetype = "Macro-region", shape = "Macro-region"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_region_incidence
+```
+
+## Race / ethnicity among confirmed cases
+
+These are **case distributions**, not population-standardized race-specific
+incidence rates. Valid race-specific incidence requires matching population
+denominators; that is handled separately if appropriate census denominators are
+used. Unknown/missing race is retained in the missingness audit but excluded
+from composition plots of named groups.
+
+```{r race-distribution}
+race_lut <- c(
+  `1` = "White",
+  `2` = "Black",
+  `3` = "Asian",
+  `4` = "Pardo (Mixed)",
+  `5` = "Indigenous",
+  `9` = "Unknown"
+)
+
+race_summary <- chik %>%
+  mutate(
+    race_code = as.character(CS_RACA),
+    race_label = dplyr::recode(race_code, !!!race_lut, .default = "Missing/other"),
+    race_named = race_code %in% as.character(1:5)
+  )
+
+race_missing <- race_summary %>%
+  summarise(
+    total_confirmed = n(),
+    missing_or_unknown = sum(!race_named),
+    pct_missing_or_unknown = 100 * missing_or_unknown / total_confirmed
+  )
+print(race_missing)
+
+race_case_total <- race_summary %>%
+  filter(race_named) %>%
+  count(race_label, name = "cases") %>%
+  mutate(percentage = 100 * cases / sum(cases))
+
+print(race_case_total)
+
+p_race_total <- ggplot(race_case_total, aes(x = reorder(race_label, -percentage), y = percentage)) +
+  geom_col(fill = "#457B9D") +
+  labs(
+    title = paste0("Race/ethnicity distribution among confirmed chikungunya cases, ", STUDY_LABEL),
+    x = "Race / ethnicity", y = "Percentage of cases with named race/ethnicity"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+p_race_total
+
+race_year_summary <- race_summary %>%
+  filter(race_named) %>%
+  count(year, race_label, name = "cases") %>%
+  group_by(year) %>%
+  mutate(percentage = 100 * cases / sum(cases)) %>%
+  ungroup()
+
+p_race_year <- ggplot(race_year_summary, aes(x = factor(year), y = percentage, fill = race_label)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = paste0("Race/ethnicity composition of confirmed chikungunya cases by year, ", STUDY_LABEL),
+    x = "Year", y = "Share of cases with named race/ethnicity", fill = "Race / ethnicity"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_race_year
+```
+
+## Race / ethnicity among deaths: descriptive only
+
+```{r race-deaths}
+race_death_summary <- race_summary %>%
+  filter(is_death, race_named) %>%
+  count(race_label, name = "deaths") %>%
+  mutate(percentage = 100 * deaths / sum(deaths))
+
+print(race_death_summary)
+
+p_race_deaths <- ggplot(race_death_summary, aes(x = reorder(race_label, -percentage), y = percentage)) +
+  geom_col(fill = "#E76F51") +
+  labs(
+    title = paste0("Race/ethnicity distribution among chikungunya deaths, ", STUDY_LABEL),
+    x = "Race / ethnicity", y = "Percentage of deaths with named race/ethnicity"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+p_race_deaths
+
+# Case fatality by race is retained only as a descriptive case-based measure.
+race_cfr <- race_summary %>%
+  filter(race_named) %>%
+  group_by(race_label) %>%
+  summarise(
+    confirmed_cases = n(),
+    deaths = sum(is_death, na.rm = TRUE),
+    CFR_percent = 100 * deaths / confirmed_cases,
+    .groups = "drop"
+  )
+
+print(race_cfr)
+```
+
+Do not interpret the race composition or case-fatality summaries as evidence of
+population-level disproportionate incidence without race-specific denominators.
+
+## Sex distribution across municipalities
+
+```{r sex-geography}
+sex_by_muni <- chik %>%
+  filter(CS_SEXO %in% c("M", "F"), !is.na(code_muni)) %>%
+  count(code_muni, CS_SEXO, name = "cases") %>%
+  tidyr::pivot_wider(names_from = CS_SEXO, values_from = cases, values_fill = 0) %>%
+  mutate(
+    total = M + F,
+    female_prop = if_else(total > 0, F / total, NA_real_),
+    fm_ratio = if_else(M > 0, F / M, NA_real_),
+    p_value = purrr::map2_dbl(F, total, ~ {
+      if (.y == 0) return(NA_real_)
+      stats::binom.test(.x, .y, p = 0.5)$p.value
+    }),
+    significant_0_05 = p_value < 0.05
+  )
+
+sex_summary <- sex_by_muni %>%
+  summarise(
+    municipalities_with_sex_data = n(),
+    significant_n = sum(significant_0_05, na.rm = TRUE),
+    significant_prop = mean(significant_0_05, na.rm = TRUE),
+    median_female_prop = median(female_prop, na.rm = TRUE)
+  )
+print(sex_summary)
+
+p_sex_diff <- ggplot(sex_by_muni, aes(x = female_prop, y = -log10(p_value))) +
+  geom_point(aes(size = total, shape = significant_0_05), alpha = 0.55) +
+  geom_vline(xintercept = 0.5, linetype = "dashed") +
+  scale_size_continuous(name = "Confirmed cases", range = c(0.8, 5)) +
+  labs(
+    title = paste0("Municipality-level sex composition of confirmed chikungunya cases, ", STUDY_LABEL),
+    x = "Female proportion",
+    y = expression(-log[10](p)),
+    shape = "p < 0.05"
+  ) +
+  theme_minimal(base_size = 11)
+
+p_sex_diff
+```
+
+The municipality-level binomial tests are descriptive diagnostics only. They do
+not adjust for municipality age structure, healthcare access, or ascertainment
+and should not be interpreted as causal evidence of sex-specific infection risk.
+
+## Supplement-only delay maps
+
+The revision plan moves municipality delay maps out of the main narrative. They
+remain here as descriptive supporting analyses because they can illustrate
+heterogeneity in access and surveillance, but they are not used to define the
+severity surface or allocation metric.
+
+```{r delay-maps}
+calc_delay_muni <- function(df, delay_col, filter_fun = NULL, min_n = 1L) {
+  d <- df %>%
+    filter(!is.na(.data[[delay_col]]), .data[[delay_col]] >= 0) %>%
+    mutate(code_muni = stringr::str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0"))
+
+  if (!is.null(filter_fun)) d <- filter_fun(d)
+
+  d %>%
+    group_by(code_muni) %>%
+    summarise(
+      n = n(),
+      median_delay = median(.data[[delay_col]], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    filter(n >= min_n)
+}
+
+plot_delay_map <- function(delay_muni, title) {
+  muni_sf %>%
+    left_join(delay_muni, by = "code_muni") %>%
+    ggplot() +
+    geom_sf(aes(fill = median_delay), color = NA) +
+    geom_sf(data = states_sf, fill = NA, color = "grey60", linewidth = 0.15) +
+    scale_fill_viridis_c(
+      name = "Median delay\n(days)",
+      limits = c(0, 50),
+      breaks = seq(0, 50, 10),
+      oob = scales::squish,
+      na.value = "grey95"
+    ) +
+    labs(title = title) +
+    theme_void(base_size = 10)
+}
+
+# Use the confirmed CHIK analytic population directly.
+plot_delay_map(
+  calc_delay_muni(chik, "report_delay"),
+  paste0("Median symptom-onset-to-notification delay, chikungunya, ", STUDY_LABEL)
+)
+
+plot_delay_map(
+  calc_delay_muni(chik, "hosp_delay", filter_fun = \(d) d %>% filter(as.character(HOSPITALIZ) == "1")),
+  paste0("Median symptom-onset-to-hospitalization delay, chikungunya, ", STUDY_LABEL)
+)
+
+plot_delay_map(
+  calc_delay_muni(chik, "death_delay", filter_fun = \(d) d %>% filter(EVOLUCAO == 2)),
+  paste0("Median symptom-onset-to-death delay, chikungunya, ", STUDY_LABEL)
+)
+
+hosp_to_death <- chik %>%
+  filter(
+    as.character(HOSPITALIZ) == "1",
+    EVOLUCAO == 2,
+    !is.na(DT_INTERNA),
+    !is.na(DT_OBITO)
+  ) %>%
+  mutate(
+    hosp_to_death_delay = as.numeric(as.Date(DT_OBITO) - as.Date(DT_INTERNA))
+  ) %>%
+  filter(hosp_to_death_delay >= 0) %>%
+  group_by(code_muni) %>%
+  summarise(
+    n = n(),
+    median_delay = median(hosp_to_death_delay, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot_delay_map(
+  hosp_to_death,
+  paste0("Median hospitalization-to-death delay, chikungunya, ", STUDY_LABEL)
+)
+
+
+
+```
+
+## Scope sanity checks
+
+```{r scope-sanity}
+cat("Study period:", STUDY_LABEL, "\n")
+cat("Confirmed chikungunya cases:", nrow(chik), "\n")
+cat("Municipalities in spatial universe:", n_distinct(muni_sf$code_muni), "\n")
+cat("Municipality-year map rows:", nrow(map_panel), "\n")
+cat("Deaths (EVOLUCAO == 2):", sum(chik$is_death, na.rm = TRUE), "\n")
+cat("Hospitalized:", sum(chik$is_hosp, na.rm = TRUE), "\n")
+cat("Missing/unknown race (%):", round(race_missing$pct_missing_or_unknown, 1), "\n")
+
+stopifnot(
+  min(chik$year, na.rm = TRUE) >= STUDY_START_YEAR,
+  max(chik$year, na.rm = TRUE) <= STUDY_END_YEAR,
+  n_distinct(map_panel$code_muni) == EXPECTED_N_MUNI,
+  n_distinct(map_panel$year) == length(STUDY_START_YEAR:STUDY_END_YEAR)
+)
+```

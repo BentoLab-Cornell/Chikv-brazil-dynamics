@@ -1,0 +1,265 @@
+---
+title: "16 - Step 3: Case-Definition Reconciliation"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+
+# Requires Chik_total created by the revised
+# 01_data_import_cleaning.Rmd.
+#
+# Primary study period:
+#   1 January 2016 – 31 December 2025
+#
+# Primary analytic definition:
+#   confirmed chikungunya cases with
+#   CLASSI_FIN %in% c(1, 13)
+```
+
+## Purpose
+
+The revised primary study period is 2016–2025.
+
+The primary analytic dataset (`Chik_total`) is constructed in
+`01_data_import_cleaning.Rmd` and contains confirmed chikungunya cases
+defined by `CLASSI_FIN %in% c(1, 13)`.
+
+This file checks the relationship between final classification
+(`CLASSI_FIN`) and confirmation criterion (`CRITERIO`) so that the
+manuscript uses terminology consistent with the actual analytic
+definition.
+
+In particular, this analysis determines:
+
+1. the exact analytic sample size for 2016–2025;
+2. the distribution of `CRITERIO` among confirmed cases;
+3. whether confirmed cases include both laboratory and
+   clinical-epidemiological confirmation;
+4. whether any confirmed cases have missing or otherwise uncategorized
+   `CRITERIO` values.
+
+No previously reported manuscript total is assumed to be correct.
+All counts below are recalculated directly from the revised
+2016–2025 analytic dataset.
+
+## Confirm analytic period and sample
+
+```{r analytic-sample-check}
+stopifnot(exists("Chik_total"))
+
+required_vars <- c("DT_SIN_PRI", "CLASSI_FIN", "CRITERIO")
+missing_vars <- setdiff(required_vars, names(Chik_total))
+
+if (length(missing_vars) > 0) {
+  stop(
+    "Missing required variables in Chik_total: ",
+    paste(missing_vars, collapse = ", ")
+  )
+}
+
+# Defensive restriction to the revised study period.
+# This should not remove any observations if 01 was run correctly.
+chik_check <- Chik_total %>%
+  mutate(DT_SIN_PRI = as.Date(DT_SIN_PRI)) %>%
+  filter(
+    !is.na(DT_SIN_PRI),
+    DT_SIN_PRI >= as.Date("2016-01-01"),
+    DT_SIN_PRI <= as.Date("2025-12-31")
+  )
+
+cat(
+  "Study period:",
+  format(min(chik_check$DT_SIN_PRI), "%Y-%m-%d"),
+  "to",
+  format(max(chik_check$DT_SIN_PRI), "%Y-%m-%d"),
+  "\n"
+)
+
+cat("Rows in Chik_total:", nrow(Chik_total), "\n")
+cat("Rows within 2016-2025:", nrow(chik_check), "\n")
+
+if (nrow(chik_check) != nrow(Chik_total)) {
+  warning(
+    "Chik_total contains observations outside 2016-2025. ",
+    "Check 01_data_import_cleaning.Rmd."
+  )
+}
+
+confirmed_cases <- chik_check %>%
+  filter(CLASSI_FIN %in% c(1, 13))
+
+cat(
+  "Confirmed analytic N (CLASSI_FIN 1/13):",
+  nrow(confirmed_cases),
+  "\n"
+)
+
+stopifnot(nrow(confirmed_cases) == nrow(chik_check))
+```
+
+## CLASSI_FIN distribution
+
+```{r classi-fin-distribution}
+cat("\nCLASSI_FIN distribution in the analytic dataset:\n")
+
+classi_distribution <- chik_check %>%
+  count(CLASSI_FIN, sort = TRUE)
+
+print(as.data.frame(classi_distribution))
+
+cat(
+  "\nTotal:",
+  sum(classi_distribution$n),
+  "\n"
+)
+```
+
+## CLASSI_FIN × CRITERIO cross-tabulation
+
+```{r classi-fin-criterio-crosstab}
+cat("\nCLASSI_FIN × CRITERIO cross-tabulation:\n")
+
+crosstab <- chik_check %>%
+  count(CLASSI_FIN, CRITERIO, .drop = FALSE) %>%
+  arrange(CLASSI_FIN, CRITERIO)
+
+print(as.data.frame(crosstab))
+
+cat(
+  "\nTotal rows represented in cross-tab:",
+  sum(crosstab$n),
+  "\n"
+)
+
+stopifnot(sum(crosstab$n) == nrow(chik_check))
+```
+
+## CRITERIO distribution among confirmed cases
+
+```{r confirmed-criterio}
+criterio_confirmed <- confirmed_cases %>%
+  count(CRITERIO, .drop = FALSE) %>%
+  mutate(
+    proportion = n / sum(n),
+    percent = 100 * proportion
+  ) %>%
+  arrange(CRITERIO)
+
+cat("\nCRITERIO distribution among confirmed cases:\n")
+
+print(as.data.frame(criterio_confirmed))
+
+cat(
+  "\nTotal confirmed cases represented:",
+  sum(criterio_confirmed$n),
+  "\n"
+)
+
+stopifnot(
+  sum(criterio_confirmed$n) == nrow(confirmed_cases)
+)
+```
+
+## Missing CRITERIO among confirmed cases
+
+```{r missing-criterio}
+n_criterio_missing <- confirmed_cases %>%
+  summarise(n = sum(is.na(CRITERIO))) %>%
+  pull(n)
+
+pct_criterio_missing <-
+  100 * n_criterio_missing / nrow(confirmed_cases)
+
+cat(
+  "Confirmed cases with missing CRITERIO:",
+  n_criterio_missing,
+  "\n"
+)
+
+cat(
+  "Percent of confirmed cases with missing CRITERIO:",
+  round(pct_criterio_missing, 4),
+  "%\n"
+)
+```
+
+## CRITERIO by year
+
+This check determines whether the confirmation criterion changed
+substantially over the revised 2016–2025 study period.
+
+```{r criterio-by-year}
+criterio_year <- confirmed_cases %>%
+  mutate(year = lubridate::year(DT_SIN_PRI)) %>%
+  count(year, CRITERIO, .drop = FALSE) %>%
+  group_by(year) %>%
+  mutate(
+    year_total = sum(n),
+    percent = 100 * n / year_total
+  ) %>%
+  ungroup() %>%
+  arrange(year, CRITERIO)
+
+print(as.data.frame(criterio_year))
+```
+
+## Final reconciliation
+
+```{r final-reconciliation}
+analytic_n <- nrow(confirmed_cases)
+
+cat("\n========================================\n")
+cat("STEP 3 FINAL RECONCILIATION\n")
+cat("========================================\n")
+
+cat("Study period: 2016-01-01 to 2025-12-31\n")
+cat("Analytic definition: CLASSI_FIN %in% c(1, 13)\n")
+
+cat(
+  "Final confirmed analytic N:",
+  format(analytic_n, big.mark = ","),
+  "\n"
+)
+
+cat(
+  "Confirmed cases with missing CRITERIO:",
+  format(n_criterio_missing, big.mark = ","),
+  "\n"
+)
+
+cat(
+  "Percent with missing CRITERIO:",
+  round(pct_criterio_missing, 4),
+  "%\n"
+)
+
+cat("\nCRITERIO counts:\n")
+print(as.data.frame(criterio_confirmed))
+
+cat("\nInterpretation:\n")
+cat(
+  "- The analytic sample is defined by final case classification ",
+  "(CLASSI_FIN), not by CRITERIO alone.\n",
+  sep = ""
+)
+
+cat(
+  "- Therefore, the manuscript should not describe the full analytic ",
+  "sample as 'laboratory-confirmed' unless every retained case is ",
+  "shown to have the laboratory-confirmation CRITERIO code.\n",
+  sep = ""
+)
+
+cat(
+  "- The exact interpretation of each numeric CRITERIO code must be ",
+  "taken from the official SINAN chikungunya data dictionary before ",
+  "labelling the categories in the manuscript.\n",
+  sep = ""
+)
+
+cat("========================================\n")
+```

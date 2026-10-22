@@ -1,0 +1,712 @@
+---
+title: "19 - Sensitivity to 2025 Reporting Completeness"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+The primary priority metric uses mean posterior transmission intensity during 2024-2025.
+Because late-2025 surveillance may still be incomplete, this sensitivity rebuilds the
+transmission component using two alternative windows:
+
+1. **2024 only**
+2. **2023-2024**
+
+and compares both against the primary **2024-2025** ranking.
+
+The severity-burden component is held fixed at the File 13 definition. This intentionally
+isolates sensitivity to the recent transmission window rather than changing multiple parts
+of the metric at once.
+
+Primary comparison: municipality ranking stability of the expected-burden score
+
+`combined_burden = T_irr * V_burden`
+
+Secondary comparison: ranking stability of `T_irr` itself.
+
+No INLA refit is performed. This file uses the saved monthly posterior IRR surface from
+the primary model.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(ggplot2)
+  library(scales)
+})
+
+EXPECTED_N_MUNI <- 5570L
+TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
+
+RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+OUT_DIR <- file.path(RESULT_ROOT, "reporting_completeness_sensitivity")
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+ST_RATE_PATH <- file.path(
+  RESULT_ROOT,
+  "st_rate_chik_region_2016_2025.rds"
+)
+
+PRIMARY_PRIORITY_PATH <- file.path(
+  RESULT_ROOT,
+  "priority_rule_evaluation_municipality_2024_2025.csv"
+)
+
+required_files <- c(
+  ST_RATE_PATH,
+  PRIMARY_PRIORITY_PATH
+)
+
+missing_files <- required_files[!file.exists(required_files)]
+
+if (length(missing_files) > 0L) {
+  stop(
+    "Required saved outputs are missing:\n",
+    paste(missing_files, collapse = "\n")
+  )
+}
+
+cat("Municipalities:", EXPECTED_N_MUNI, "\n")
+cat("Matched top-third:", TOP_N, "\n")
+cat("Posterior IRR surface:", ST_RATE_PATH, "\n")
+cat("Primary File 13 ranking:", PRIMARY_PRIORITY_PATH, "\n")
+```
+
+# 1. Load fixed inputs
+
+```{r load-inputs}
+st_rate <- readRDS(ST_RATE_PATH) %>%
+  mutate(
+    ym_date = as.Date(ym_date),
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  )
+
+primary_priority <- readr::read_csv(
+  PRIMARY_PRIORITY_PATH,
+  show_col_types = FALSE,
+  col_types = cols(
+    code_muni = col_character(),
+    .default = col_guess()
+  )
+) %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    )
+  )
+
+required_priority_cols <- c(
+  "code_muni",
+  "T_irr",
+  "V_burden",
+  "combined_burden"
+)
+
+stopifnot(
+  all(required_priority_cols %in% names(primary_priority)),
+  nrow(primary_priority) == EXPECTED_N_MUNI,
+  dplyr::n_distinct(primary_priority$code_muni) == EXPECTED_N_MUNI,
+  all(is.finite(primary_priority$T_irr)),
+  all(is.finite(primary_priority$V_burden)),
+  all(is.finite(primary_priority$combined_burden))
+)
+
+stopifnot(
+  all(c("code_muni", "ym_date", "IRR") %in% names(st_rate)),
+  all(is.finite(st_rate$IRR))
+)
+
+cat(
+  "Posterior IRR dates:",
+  as.character(min(st_rate$ym_date, na.rm = TRUE)),
+  "to",
+  as.character(max(st_rate$ym_date, na.rm = TRUE)),
+  "\n"
+)
+```
+
+# 2. Rebuild transmission intensity under alternative windows
+
+```{r rebuild-transmission}
+make_T_window <- function(dat, years, new_name) {
+
+  ans <- dat %>%
+    filter(lubridate::year(ym_date) %in% years) %>%
+    group_by(code_muni) %>%
+    summarise(
+      value = mean(IRR, na.rm = TRUE),
+      n_months = sum(is.finite(IRR)),
+      .groups = "drop"
+    )
+
+  stopifnot(
+    nrow(ans) == EXPECTED_N_MUNI,
+    dplyr::n_distinct(ans$code_muni) == EXPECTED_N_MUNI,
+    all(is.finite(ans$value))
+  )
+
+  expected_months <- 12L * length(years)
+
+  if (!all(ans$n_months == expected_months)) {
+    warning(
+      "Not every municipality has exactly ",
+      expected_months,
+      " finite monthly IRR values for ",
+      new_name,
+      "."
+    )
+  }
+
+  ans %>%
+    select(code_muni, value) %>%
+    rename(!!new_name := value)
+}
+
+T_2024 <- make_T_window(
+  st_rate,
+  years = 2024,
+  new_name = "T_2024"
+)
+
+T_2324 <- make_T_window(
+  st_rate,
+  years = 2023:2024,
+  new_name = "T_2324"
+)
+
+T_2425_rebuilt <- make_T_window(
+  st_rate,
+  years = 2024:2025,
+  new_name = "T_2425_rebuilt"
+)
+
+sensitivity_metric <- primary_priority %>%
+  select(
+    code_muni,
+    V_burden,
+    T_2425_saved = T_irr,
+    B_2425_saved = combined_burden
+  ) %>%
+  left_join(T_2024, by = "code_muni") %>%
+  left_join(T_2324, by = "code_muni") %>%
+  left_join(T_2425_rebuilt, by = "code_muni") %>%
+  mutate(
+    B_2024 = T_2024 * V_burden,
+    B_2324 = T_2324 * V_burden,
+    B_2425_rebuilt = T_2425_rebuilt * V_burden
+  )
+
+stopifnot(
+  nrow(sensitivity_metric) == EXPECTED_N_MUNI,
+  all(is.finite(sensitivity_metric$B_2024)),
+  all(is.finite(sensitivity_metric$B_2324)),
+  all(is.finite(sensitivity_metric$B_2425_rebuilt))
+)
+
+cat(
+  "Max absolute difference between saved and rebuilt 2024-2025 T:",
+  max(abs(
+    sensitivity_metric$T_2425_saved -
+      sensitivity_metric$T_2425_rebuilt
+  )),
+  "\n"
+)
+
+cat(
+  "Max absolute difference between saved and rebuilt 2024-2025 burden:",
+  max(abs(
+    sensitivity_metric$B_2425_saved -
+      sensitivity_metric$B_2425_rebuilt
+  )),
+  "\n"
+)
+
+stopifnot(
+  isTRUE(all.equal(
+    sensitivity_metric$T_2425_saved,
+    sensitivity_metric$T_2425_rebuilt,
+    tolerance = 1e-10,
+    check.attributes = FALSE
+  )),
+  isTRUE(all.equal(
+    sensitivity_metric$B_2425_saved,
+    sensitivity_metric$B_2425_rebuilt,
+    tolerance = 1e-10,
+    check.attributes = FALSE
+  ))
+)
+```
+
+# 3. Assign deterministic national ranks
+
+Ranks are generated after sorting by score and then municipality code, so top-third
+membership is deterministic even if exact score ties occur.
+
+```{r assign-ranks}
+rank_score <- function(dat, score_col, rank_name) {
+  dat %>%
+    arrange(
+      desc(.data[[score_col]]),
+      code_muni
+    ) %>%
+    mutate(
+      !!rank_name := row_number()
+    ) %>%
+    select(code_muni, all_of(rank_name))
+}
+
+rank_tables <- list(
+  rank_T_2024 = rank_score(
+    sensitivity_metric,
+    "T_2024",
+    "rank_T_2024"
+  ),
+  rank_T_2324 = rank_score(
+    sensitivity_metric,
+    "T_2324",
+    "rank_T_2324"
+  ),
+  rank_T_2425 = rank_score(
+    sensitivity_metric,
+    "T_2425_saved",
+    "rank_T_2425"
+  ),
+  rank_B_2024 = rank_score(
+    sensitivity_metric,
+    "B_2024",
+    "rank_B_2024"
+  ),
+  rank_B_2324 = rank_score(
+    sensitivity_metric,
+    "B_2324",
+    "rank_B_2324"
+  ),
+  rank_B_2425 = rank_score(
+    sensitivity_metric,
+    "B_2425_saved",
+    "rank_B_2425"
+  )
+)
+
+ranked_metric <- sensitivity_metric
+
+for (x in rank_tables) {
+  ranked_metric <- ranked_metric %>%
+    left_join(x, by = "code_muni")
+}
+
+ranked_metric <- ranked_metric %>%
+  mutate(
+    top_T_2024 = rank_T_2024 <= TOP_N,
+    top_T_2324 = rank_T_2324 <= TOP_N,
+    top_T_2425 = rank_T_2425 <= TOP_N,
+    top_B_2024 = rank_B_2024 <= TOP_N,
+    top_B_2324 = rank_B_2324 <= TOP_N,
+    top_B_2425 = rank_B_2425 <= TOP_N,
+
+    delta_rank_B_2024_vs_2425 =
+      rank_B_2024 - rank_B_2425,
+
+    delta_rank_B_2324_vs_2425 =
+      rank_B_2324 - rank_B_2425,
+
+    abs_delta_rank_B_2024_vs_2425 =
+      abs(delta_rank_B_2024_vs_2425),
+
+    abs_delta_rank_B_2324_vs_2425 =
+      abs(delta_rank_B_2324_vs_2425)
+  )
+
+stopifnot(
+  sum(ranked_metric$top_B_2024) == TOP_N,
+  sum(ranked_metric$top_B_2324) == TOP_N,
+  sum(ranked_metric$top_B_2425) == TOP_N
+)
+```
+
+# 4. Spearman rank correlations
+
+```{r spearman-correlations}
+spearman_summary <- tibble::tribble(
+  ~metric, ~comparison, ~rho,
+
+  "Transmission intensity",
+  "2024 only vs 2024-2025",
+  cor(
+    ranked_metric$T_2024,
+    ranked_metric$T_2425_saved,
+    method = "spearman"
+  ),
+
+  "Transmission intensity",
+  "2023-2024 vs 2024-2025",
+  cor(
+    ranked_metric$T_2324,
+    ranked_metric$T_2425_saved,
+    method = "spearman"
+  ),
+
+  "Transmission intensity",
+  "2024 only vs 2023-2024",
+  cor(
+    ranked_metric$T_2024,
+    ranked_metric$T_2324,
+    method = "spearman"
+  ),
+
+  "Expected-burden",
+  "2024 only vs 2024-2025",
+  cor(
+    ranked_metric$B_2024,
+    ranked_metric$B_2425_saved,
+    method = "spearman"
+  ),
+
+  "Expected-burden",
+  "2023-2024 vs 2024-2025",
+  cor(
+    ranked_metric$B_2324,
+    ranked_metric$B_2425_saved,
+    method = "spearman"
+  ),
+
+  "Expected-burden",
+  "2024 only vs 2023-2024",
+  cor(
+    ranked_metric$B_2024,
+    ranked_metric$B_2324,
+    method = "spearman"
+  )
+)
+
+print(spearman_summary)
+```
+
+# 5. Top-third overlap
+
+```{r top-third-overlap}
+top_set <- function(dat, indicator_col) {
+  dat$code_muni[dat[[indicator_col]]]
+}
+
+set_overlap <- function(set_a, set_b, label_a, label_b, metric_name) {
+
+  intersection_n <- length(intersect(set_a, set_b))
+  union_n <- length(union(set_a, set_b))
+
+  tibble(
+    metric = metric_name,
+    comparison = paste(label_a, "vs", label_b),
+    n_each = length(set_a),
+    intersection_n = intersection_n,
+    overlap_share = intersection_n / length(set_a),
+    jaccard = intersection_n / union_n,
+    entered_vs_reference = length(setdiff(set_a, set_b)),
+    left_reference = length(setdiff(set_b, set_a))
+  )
+}
+
+top_overlap <- bind_rows(
+  set_overlap(
+    top_set(ranked_metric, "top_T_2024"),
+    top_set(ranked_metric, "top_T_2425"),
+    "2024 only",
+    "2024-2025",
+    "Transmission intensity"
+  ),
+  set_overlap(
+    top_set(ranked_metric, "top_T_2324"),
+    top_set(ranked_metric, "top_T_2425"),
+    "2023-2024",
+    "2024-2025",
+    "Transmission intensity"
+  ),
+  set_overlap(
+    top_set(ranked_metric, "top_B_2024"),
+    top_set(ranked_metric, "top_B_2425"),
+    "2024 only",
+    "2024-2025",
+    "Expected-burden"
+  ),
+  set_overlap(
+    top_set(ranked_metric, "top_B_2324"),
+    top_set(ranked_metric, "top_B_2425"),
+    "2023-2024",
+    "2024-2025",
+    "Expected-burden"
+  )
+)
+
+print(top_overlap)
+```
+
+# 6. Magnitude of municipality rank changes
+
+```{r rank-shift-summary}
+summarize_abs_shift <- function(x, comparison_name) {
+  tibble(
+    comparison = comparison_name,
+    median_abs_rank_change = median(x),
+    q75_abs_rank_change = unname(quantile(x, 0.75)),
+    q90_abs_rank_change = unname(quantile(x, 0.90)),
+    q95_abs_rank_change = unname(quantile(x, 0.95)),
+    q99_abs_rank_change = unname(quantile(x, 0.99)),
+    max_abs_rank_change = max(x)
+  )
+}
+
+rank_shift_summary <- bind_rows(
+  summarize_abs_shift(
+    ranked_metric$abs_delta_rank_B_2024_vs_2425,
+    "Expected-burden: 2024 only vs 2024-2025"
+  ),
+  summarize_abs_shift(
+    ranked_metric$abs_delta_rank_B_2324_vs_2425,
+    "Expected-burden: 2023-2024 vs 2024-2025"
+  )
+)
+
+print(rank_shift_summary)
+```
+
+# 7. Municipalities crossing the primary top-third boundary
+
+This table identifies municipalities entering or leaving the primary 2024-2025 top third
+under each alternative window. It is diagnostic only; it is not a new priority rule.
+
+```{r boundary-crossers}
+boundary_crossers <- ranked_metric %>%
+  transmute(
+    code_muni,
+
+    rank_B_2024,
+    rank_B_2324,
+    rank_B_2425,
+
+    top_B_2024,
+    top_B_2324,
+    top_B_2425,
+
+    status_2024_vs_2425 = case_when(
+      top_B_2024 & top_B_2425 ~ "Top third in both",
+      top_B_2024 & !top_B_2425 ~ "Enters under 2024 only",
+      !top_B_2024 & top_B_2425 ~ "Leaves under 2024 only",
+      TRUE ~ "Outside top third in both"
+    ),
+
+    status_2324_vs_2425 = case_when(
+      top_B_2324 & top_B_2425 ~ "Top third in both",
+      top_B_2324 & !top_B_2425 ~ "Enters under 2023-2024",
+      !top_B_2324 & top_B_2425 ~ "Leaves under 2023-2024",
+      TRUE ~ "Outside top third in both"
+    )
+  )
+
+cat("\n2024-only vs 2024-2025 top-third status:\n")
+print(
+  boundary_crossers %>%
+    count(status_2024_vs_2425) %>%
+    arrange(desc(n))
+)
+
+cat("\n2023-2024 vs 2024-2025 top-third status:\n")
+print(
+  boundary_crossers %>%
+    count(status_2324_vs_2425) %>%
+    arrange(desc(n))
+)
+```
+
+# 8. Stability figure
+
+```{r stability-figure, fig.width=8.2, fig.height=4.2}
+rank_plot_data <- bind_rows(
+  ranked_metric %>%
+    transmute(
+      reference_rank = rank_B_2425,
+      sensitivity_rank = rank_B_2024,
+      comparison = "2024 only vs 2024-2025"
+    ),
+  ranked_metric %>%
+    transmute(
+      reference_rank = rank_B_2425,
+      sensitivity_rank = rank_B_2324,
+      comparison = "2023-2024 vs 2024-2025"
+    )
+)
+
+p_rank_stability <- ggplot(
+  rank_plot_data,
+  aes(
+    x = reference_rank,
+    y = sensitivity_rank
+  )
+) +
+  geom_point(alpha = 0.20, size = 0.7) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_vline(
+    xintercept = TOP_N,
+    linetype = "dotted",
+    linewidth = 0.4
+  ) +
+  geom_hline(
+    yintercept = TOP_N,
+    linetype = "dotted",
+    linewidth = 0.4
+  ) +
+  facet_wrap(~ comparison, nrow = 1) +
+  coord_equal() +
+  scale_x_continuous(
+    limits = c(1, EXPECTED_N_MUNI),
+    breaks = c(1, TOP_N, 3000, 4500, EXPECTED_N_MUNI),
+    labels = scales::comma
+  ) +
+  scale_y_continuous(
+    limits = c(1, EXPECTED_N_MUNI),
+    breaks = c(1, TOP_N, 3000, 4500, EXPECTED_N_MUNI),
+    labels = scales::comma
+  ) +
+  labs(
+    x = "Primary 2024-2025 expected-burden rank",
+    y = "Sensitivity expected-burden rank"
+  ) +
+  theme_classic(base_size = 10)
+
+print(p_rank_stability)
+```
+
+# 9. Save outputs
+
+```{r save-outputs}
+readr::write_csv(
+  ranked_metric,
+  file.path(
+    OUT_DIR,
+    "reporting_completeness_municipality_rankings.csv"
+  )
+)
+
+readr::write_csv(
+  spearman_summary,
+  file.path(
+    OUT_DIR,
+    "reporting_completeness_spearman_correlations.csv"
+  )
+)
+
+readr::write_csv(
+  top_overlap,
+  file.path(
+    OUT_DIR,
+    "reporting_completeness_top_third_overlap.csv"
+  )
+)
+
+readr::write_csv(
+  rank_shift_summary,
+  file.path(
+    OUT_DIR,
+    "reporting_completeness_rank_shift_summary.csv"
+  )
+)
+
+readr::write_csv(
+  boundary_crossers,
+  file.path(
+    OUT_DIR,
+    "reporting_completeness_top_third_crossers.csv"
+  )
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "reporting_completeness_rank_stability.png"
+  ),
+  p_rank_stability,
+  width = 8.2,
+  height = 4.2,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(
+    OUT_DIR,
+    "reporting_completeness_rank_stability.pdf"
+  ),
+  p_rank_stability,
+  width = 8.2,
+  height = 4.2
+)
+
+cat("\nSaved File 19 outputs to:\n", OUT_DIR, "\n")
+```
+
+# 10. Final checks
+
+```{r final-checks}
+stopifnot(
+  nrow(ranked_metric) == EXPECTED_N_MUNI,
+  nrow(spearman_summary) == 6L,
+  nrow(top_overlap) == 4L,
+  all(top_overlap$n_each == TOP_N),
+  all(
+    spearman_summary$rho >= -1 &
+      spearman_summary$rho <= 1
+  ),
+  all(
+    top_overlap$overlap_share >= 0 &
+      top_overlap$overlap_share <= 1
+  )
+)
+
+cat("\n============================================================\n")
+cat("2025 REPORTING-COMPLETENESS SENSITIVITY COMPLETE\n")
+cat("Primary window: 2024-2025\n")
+cat("Sensitivity windows: 2024 only; 2023-2024\n")
+cat("Top-third:", TOP_N, "of", EXPECTED_N_MUNI, "municipalities\n")
+cat("============================================================\n")
+```
+
+# Interpretation
+
+The key outputs are:
+
+1. Spearman correlation of municipality rankings;
+2. overlap of the top-third municipality sets;
+3. distribution of absolute rank changes.
+
+If the alternative-window rankings remain highly concordant with the primary 2024-2025
+ranking, this supports the conclusion that the targeting result is not driven by potentially
+incomplete late-2025 surveillance.
+
+If rank stability is materially weaker, report the sensitivity directly and use the more
+conservative transmission window in the targeting analysis rather than masking the instability.
+
+# Interpretation guardrails
+
+- This sensitivity changes the recent **transmission window only**.
+- The severity-burden component is intentionally fixed to the File 13 definition so that the
+  analysis isolates possible bias from 2025 reporting completeness.
+- `combined_burden` is a relative prioritization score, not a calibrated predicted death count.
+- Do not describe rank stability as proof that 2025 surveillance is complete.
+- The analysis tests robustness of the municipality prioritization to excluding 2025 data.

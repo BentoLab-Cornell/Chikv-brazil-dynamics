@@ -1,0 +1,872 @@
+---
+title: "18 - External Validation Against 2026 Chikungunya Surveillance"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+This file performs the planned **2026 external validation** using surveillance data that were
+not included in the 2016-2025 analytic window.
+
+Primary aims:
+
+1. score the paper's fixed 2024-2025 municipality priority rankings against observed 2026
+   confirmed cases and deaths;
+2. summarize the age distribution of observed 2026 deaths relative to the Brazilian IXCHIQ
+   18-59 age window;
+3. inspect Dourados and the named 2026 pilot municipalities against the pre-2026 rankings;
+4. optionally compare the pilot municipalities with the existing 2025 rolling-origin forecast
+   ranking if that prediction file is present.
+
+This is external corroboration using a **partial/provisional 2026 surveillance file**. It is not
+a completed full-year analysis. Re-pull the 2026 source immediately before manuscript submission.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+
+source("00_setup.R")
+
+EXPECTED_N_MUNI <- 5570L
+TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
+
+RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+OUT_DIR <- file.path(RESULT_ROOT, "external_validation_2026")
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# Current fixed 2024-2025 rule evaluation produced by File 13.
+PRIORITY_PATH <- file.path(
+  RESULT_ROOT,
+  "priority_rule_evaluation_municipality_2024_2025.csv"
+)
+
+# Existing one-year-ahead 2025 rolling-origin prediction produced by File 14.
+# This is a through-2024 forecast for 2025; it is NOT a through-2025 forecast for 2026.
+ROLLING_2025_PATH <- file.path(
+  RESULT_ROOT,
+  "rolling_origin",
+  "predictions",
+  "forecast_annual_predict_2025.csv"
+)
+
+# Raw 2026 DBC used only for external validation.
+CHIK26_PATH <- file.path(CHIK_DATA_DIR, "CHIKBR26.dbc")
+
+cat("Top-third municipality count:", TOP_N, "\n")
+cat("Priority ranking:", PRIORITY_PATH, "\n")
+cat("2026 DBC:", CHIK26_PATH, "\n")
+```
+
+# 1. Load fixed pre-2026 rankings
+
+```{r load-rankings}
+if (!file.exists(PRIORITY_PATH)) {
+  stop(
+    "Missing File 13 output:\n", PRIORITY_PATH,
+    "\nRun File 13 or restore the saved output before File 18."
+  )
+}
+
+priority_2425 <- readr::read_csv(
+  PRIORITY_PATH,
+  show_col_types = FALSE,
+  col_types = cols(
+    code_muni = col_character(),
+    .default = col_guess()
+  )
+) %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6, side = "left", pad = "0"
+    )
+  )
+
+required_priority_cols <- c(
+  "code_muni", "T_irr", "V_burden", "combined_burden"
+)
+
+stopifnot(
+  all(required_priority_cols %in% names(priority_2425)),
+  nrow(priority_2425) == EXPECTED_N_MUNI,
+  dplyr::n_distinct(priority_2425$code_muni) == EXPECTED_N_MUNI
+)
+
+cat("Fixed pre-2026 ranking municipalities:", nrow(priority_2425), "\n")
+```
+
+# 2. Load the 2026 surveillance file separately
+
+The 2026 file is never bound into `Chik_total`.
+
+If `Chik_2026` already exists in the current R session, it is reused. Otherwise only
+`CHIKBR26.dbc` is read; there is no need to rerun the entire 2016-2025 import notebook.
+
+```{r load-2026}
+if (!exists("Chik_2026")) {
+  if (!file.exists(CHIK26_PATH)) {
+    stop(
+      "CHIKBR26.dbc not found at:\n", CHIK26_PATH,
+      "\nCheck RAW_DBC_DIR in 00_setup.R."
+    )
+  }
+
+  Chik_2026 <- read.dbc::read.dbc(CHIK26_PATH) %>%
+    mutate(DT_SIN_PRI = as.Date(DT_SIN_PRI))
+} else {
+  Chik_2026 <- Chik_2026 %>%
+    mutate(DT_SIN_PRI = as.Date(DT_SIN_PRI))
+}
+
+cat("Raw 2026 notifications:", nrow(Chik_2026), "\n")
+cat(
+  "Latest non-missing notification date in local 2026 file:",
+  as.character(max(Chik_2026$DT_SIN_PRI, na.rm = TRUE)),
+  "\n"
+)
+
+# IMPORTANT: the date above is the latest notification date present in the local file,
+# not necessarily the official extraction/download date.
+```
+
+# 3. Fixed municipality lookup
+
+```{r municipality-lookup}
+MUNI_PATH_CANDIDATES <- c(
+  file.path(getwd(), "muni_sf_2020.rds"),
+  file.path(RESULT_ROOT, "muni_sf_2020.rds"),
+  path.expand("~/muni_sf_2020.rds")
+)
+
+muni_hit <- MUNI_PATH_CANDIDATES[file.exists(MUNI_PATH_CANDIDATES)]
+
+if (length(muni_hit) > 0L) {
+  muni_sf <- readRDS(muni_hit[1])
+} else {
+  # Same 2020 spatial reference used elsewhere in the revised pipeline.
+  muni_sf <- geobr::read_municipality(year = 2020, showProgress = FALSE)
+}
+
+muni_lookup <- muni_sf %>%
+  sf::st_drop_geometry() %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(code_muni), 1, 6),
+      width = 6, side = "left", pad = "0"
+    )
+  ) %>%
+  select(
+    code_muni,
+    any_of(c(
+      "name_muni", "code_state", "abbrev_state",
+      "name_state", "code_region", "name_region"
+    ))
+  ) %>%
+  distinct(code_muni, .keep_all = TRUE)
+
+stopifnot(
+  nrow(muni_lookup) == EXPECTED_N_MUNI,
+  dplyr::n_distinct(muni_lookup$code_muni) == EXPECTED_N_MUNI
+)
+```
+
+# 4. Construct confirmed 2026 external-validation outcomes
+
+The established revised case definition is retained here:
+`CLASSI_FIN %in% c(1, 13)`.
+
+```{r construct-2026-outcomes}
+decode_age_years_2026 <- function(x) {
+  x <- suppressWarnings(as.numeric(as.character(x)))
+  unit_code <- floor(x / 1000)
+  value <- x %% 1000
+
+  dplyr::case_when(
+    unit_code == 1 ~ value / (24 * 365),
+    unit_code == 2 ~ value / 365,
+    unit_code == 3 ~ value / 12,
+    unit_code == 4 ~ value,
+    TRUE ~ NA_real_
+  )
+}
+
+chik26_confirmed <- Chik_2026 %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(ID_MUNICIP), 1, 6),
+      width = 6, side = "left", pad = "0"
+    ),
+    age_years = decode_age_years_2026(NU_IDADE_N),
+    death = as.integer(as.character(EVOLUCAO) == "2")
+  ) %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(DT_SIN_PRI),
+    DT_SIN_PRI >= as.Date("2026-01-01"),
+    DT_SIN_PRI <= as.Date("2026-12-31"),
+    code_muni %in% priority_2425$code_muni
+  )
+
+cat("Confirmed 2026 cases in fixed 5,570-municipality universe:",
+    nrow(chik26_confirmed), "\n")
+cat("Confirmed 2026 deaths:",
+    sum(chik26_confirmed$death, na.rm = TRUE), "\n")
+
+obs_2026 <- chik26_confirmed %>%
+  group_by(code_muni) %>%
+  summarise(
+    cases_2026 = n(),
+    deaths_2026 = sum(death, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+eval_2026 <- priority_2425 %>%
+  select(
+    code_muni,
+    T_irr,
+    V_burden,
+    combined_burden
+  ) %>%
+  left_join(obs_2026, by = "code_muni") %>%
+  mutate(
+    cases_2026 = tidyr::replace_na(cases_2026, 0L),
+    deaths_2026 = tidyr::replace_na(deaths_2026, 0L)
+  ) %>%
+  left_join(muni_lookup, by = "code_muni")
+
+stopifnot(
+  nrow(eval_2026) == EXPECTED_N_MUNI,
+  sum(eval_2026$cases_2026) == nrow(chik26_confirmed),
+  sum(eval_2026$deaths_2026) == sum(chik26_confirmed$death, na.rm = TRUE)
+)
+```
+
+# 5. External validation at matched top-third coverage
+
+The ranking is fixed before looking at 2026 outcomes. We score the same three rules used
+in File 13:
+
+1. transmission-only (`T_irr`);
+2. age/severity-only (`V_burden`);
+3. expected-burden (`combined_burden`).
+
+```{r score-fixed-rankings}
+rule_specs <- tibble::tribble(
+  ~rule, ~score_col,
+  "Transmission-only", "T_irr",
+  "Age/severity-only", "V_burden",
+  "Expected-burden", "combined_burden"
+)
+
+score_top_n_2026 <- function(dat, score_col, rule_name, n_select = TOP_N) {
+
+  selected <- dat %>%
+    arrange(desc(.data[[score_col]]), code_muni) %>%
+    slice_head(n = n_select)
+
+  total_cases <- sum(dat$cases_2026, na.rm = TRUE)
+  total_deaths <- sum(dat$deaths_2026, na.rm = TRUE)
+
+  tibble(
+    rule = rule_name,
+    n_selected = nrow(selected),
+    municipality_coverage = nrow(selected) / nrow(dat),
+    cases_captured = sum(selected$cases_2026, na.rm = TRUE),
+    cases_total = total_cases,
+    cases_capture_share = ifelse(
+      total_cases > 0,
+      sum(selected$cases_2026, na.rm = TRUE) / total_cases,
+      NA_real_
+    ),
+    deaths_captured = sum(selected$deaths_2026, na.rm = TRUE),
+    deaths_total = total_deaths,
+    deaths_capture_share = ifelse(
+      total_deaths > 0,
+      sum(selected$deaths_2026, na.rm = TRUE) / total_deaths,
+      NA_real_
+    )
+  )
+}
+
+external_validation_top_third <- purrr::map2_dfr(
+  rule_specs$score_col,
+  rule_specs$rule,
+  ~ score_top_n_2026(eval_2026, .x, .y)
+)
+
+print(external_validation_top_third)
+```
+
+# 6. Municipality ranks and Dourados
+
+```{r municipality-ranks}
+ranked_2026 <- eval_2026 %>%
+  mutate(
+    rank_transmission = rank(-T_irr, ties.method = "min"),
+    rank_age_severity = rank(-V_burden, ties.method = "min"),
+    rank_expected_burden = rank(-combined_burden, ties.method = "min"),
+    top_third_transmission = rank_transmission <= TOP_N,
+    top_third_age_severity = rank_age_severity <= TOP_N,
+    top_third_expected_burden = rank_expected_burden <= TOP_N
+  )
+
+normalize_name <- function(x) {
+  x <- enc2utf8(as.character(x))
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+  x <- toupper(trimws(x))
+  x <- gsub("[^A-Z0-9 ]+", " ", x)
+  x <- gsub("\\s+", " ", x)
+  trimws(x)
+}
+
+if ("name_muni" %in% names(ranked_2026)) {
+
+  dourados_result <- ranked_2026 %>%
+    mutate(name_key = normalize_name(name_muni)) %>%
+    filter(name_key == "DOURADOS") %>%
+    select(
+      code_muni,
+      any_of(c("name_muni", "abbrev_state", "name_state")),
+      cases_2026,
+      deaths_2026,
+      rank_transmission,
+      rank_age_severity,
+      rank_expected_burden,
+      top_third_transmission,
+      top_third_age_severity,
+      top_third_expected_burden
+    )
+
+  cat("\nDourados external-validation row:\n")
+  print(dourados_result)
+
+} else {
+
+  dourados_result <- tibble()
+  warning("name_muni is unavailable; Dourados name-based lookup was skipped.")
+}
+```
+
+# 7. Named 2026 pilot municipalities from the revision plan
+
+This is the **named subset recorded in the revision plan**, not a claim that it is the
+complete final Ministry pilot list. The official list should be re-checked before submission.
+
+Four municipality names contain accented spellings that can be encoded inconsistently in
+the 2020 municipality object. To avoid fragile string matching, the pilot table uses fixed
+six-digit IBGE municipality codes for all 14 named municipalities.
+
+```{r pilot-municipalities}
+pilot_named <- tibble::tribble(
+  ~name_plan, ~state_plan, ~code_muni,
+  "Dourados", "MS", "500370",
+  "Itapora", "MS", "500450",
+  "Amambai", "MS", "500060",
+  "Bataypora", "MS", "500200",
+  "Douradina", "MS", "500350",
+  "Sete Quedas", "MS", "500770",
+  "Bady Bassitt", "SP", "350460",
+  "Mirassol", "SP", "353030",
+  "Simao Dias", "SE", "280710",
+  "Barra dos Coqueiros", "SE", "280060",
+  "Lagarto", "SE", "280350",
+  "Santa Luzia", "MG", "315780",
+  "Sabara", "MG", "315670",
+  "Congonhas", "MG", "311800"
+)
+
+pilot_eval <- pilot_named %>%
+  left_join(
+    ranked_2026,
+    by = "code_muni"
+  ) %>%
+  select(
+    code_muni,
+    name_plan,
+    state_plan,
+    any_of(c("name_muni", "abbrev_state", "name_state")),
+    cases_2026,
+    deaths_2026,
+    rank_transmission,
+    rank_age_severity,
+    rank_expected_burden,
+    top_third_transmission,
+    top_third_age_severity,
+    top_third_expected_burden
+  ) %>%
+  arrange(rank_expected_burden)
+
+unmatched_pilot <- pilot_eval %>%
+  filter(
+    is.na(name_muni) |
+      is.na(rank_expected_burden)
+  )
+
+if (nrow(unmatched_pilot) > 0L) {
+  cat("\nUnmatched pilot municipalities after IBGE-code join:\n")
+  print(unmatched_pilot %>% select(name_plan, state_plan, code_muni))
+  stop("Pilot municipality matching is incomplete after IBGE-code join.")
+}
+
+cat("\nNamed pilot municipalities matched:",
+    nrow(pilot_eval), "of", nrow(pilot_named), "\n")
+print(pilot_eval)
+
+stopifnot(
+  nrow(pilot_eval) == 14L,
+  dplyr::n_distinct(pilot_eval$code_muni) == 14L
+)
+```
+
+# 8. Optional comparison with the existing 2025 rolling-origin forecast
+
+The existing File 14 prediction for target year 2025 was generated using data available
+before 2025. It can be used only as an additional **ranking** comparison.
+
+**It must not be described as a model fitted through 2025 to predict 2026.**
+The absolute `forecast_annual` values are not interpreted here; only their ordering is used.
+A genuine through-2025 -> 2026 forecast would require a separate forecast fit.
+
+```{r optional-rolling-ranking}
+rolling_2025_available <- file.exists(ROLLING_2025_PATH)
+
+if (rolling_2025_available) {
+
+  rolling_2025 <- readr::read_csv(
+    ROLLING_2025_PATH,
+    show_col_types = FALSE,
+    col_types = cols(
+      code_muni = col_character(),
+      .default = col_guess()
+    )
+  ) %>%
+    mutate(
+      code_muni = stringr::str_pad(
+        substr(as.character(code_muni), 1, 6),
+        width = 6, side = "left", pad = "0"
+      )
+    )
+
+  stopifnot(
+    nrow(rolling_2025) == EXPECTED_N_MUNI,
+    "forecast_annual" %in% names(rolling_2025),
+    all(is.finite(rolling_2025$forecast_annual))
+  )
+
+  eval_rolling_2025_vs_2026 <- eval_2026 %>%
+    select(
+      code_muni,
+      cases_2026,
+      deaths_2026,
+      any_of(c("name_muni", "abbrev_state", "name_state"))
+    ) %>%
+    left_join(
+      rolling_2025 %>% select(code_muni, forecast_annual),
+      by = "code_muni"
+    ) %>%
+    mutate(
+      rank_rolling_2025 = rank(-forecast_annual, ties.method = "min"),
+      top_third_rolling_2025 = rank_rolling_2025 <= TOP_N
+    )
+
+  rolling_external_score <- score_top_n_2026(
+    eval_rolling_2025_vs_2026,
+    "forecast_annual",
+    "Rolling-origin 2025 ranking"
+  )
+
+  print(rolling_external_score)
+
+  if ("name_muni" %in% names(eval_rolling_2025_vs_2026)) {
+    dourados_rolling <- eval_rolling_2025_vs_2026 %>%
+      mutate(name_key = normalize_name(name_muni)) %>%
+      filter(name_key == "DOURADOS") %>%
+      select(
+        code_muni,
+        name_muni,
+        abbrev_state,
+        cases_2026,
+        deaths_2026,
+        rank_rolling_2025,
+        top_third_rolling_2025
+      )
+
+    cat("\nDourados in existing 2025 rolling-origin ranking:\n")
+    print(dourados_rolling)
+  }
+
+} else {
+  cat(
+    "Optional rolling-origin 2025 prediction not found; skipping this comparison:\n",
+    ROLLING_2025_PATH, "\n"
+  )
+}
+```
+
+# 9. Age distribution of 2026 deaths
+
+```{r age-distribution-deaths}
+death_age_2026 <- chik26_confirmed %>%
+  filter(death == 1L) %>%
+  mutate(
+    eligibility_age_band = case_when(
+      is.na(age_years) ~ "Age missing/unknown",
+      age_years < 18 ~ "<18",
+      age_years >= 18 & age_years <= 59 ~ "18-59",
+      age_years >= 60 ~ "60+",
+      TRUE ~ "Age missing/unknown"
+    ),
+    eligibility_age_band = factor(
+      eligibility_age_band,
+      levels = c("<18", "18-59", "60+", "Age missing/unknown")
+    )
+  ) %>%
+  count(eligibility_age_band, name = "deaths") %>%
+  mutate(
+    share_all_deaths = deaths / sum(deaths)
+  )
+
+print(death_age_2026)
+
+known_age_deaths <- death_age_2026 %>%
+  filter(eligibility_age_band != "Age missing/unknown") %>%
+  summarise(n = sum(deaths)) %>%
+  pull(n)
+
+age_window_summary <- death_age_2026 %>%
+  mutate(
+    status = case_when(
+      eligibility_age_band == "18-59" ~ "Inside 18-59 age window",
+      eligibility_age_band %in% c("<18", "60+") ~ "Outside 18-59 age window",
+      TRUE ~ "Age missing/unknown"
+    )
+  ) %>%
+  group_by(status) %>%
+  summarise(
+    deaths = sum(deaths),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    share_all_deaths = deaths / sum(deaths),
+    share_known_age_deaths = ifelse(
+      status == "Age missing/unknown" | known_age_deaths == 0,
+      NA_real_,
+      deaths / known_age_deaths
+    )
+  )
+
+cat("\n2026 death age-window summary:\n")
+print(age_window_summary)
+```
+
+# 10. State-level 2026 descriptive table
+
+```{r state-summary}
+state_group_cols <- intersect(
+  c("code_state", "abbrev_state", "name_state"),
+  names(eval_2026)
+)
+
+if (length(state_group_cols) > 0L) {
+
+  state_2026 <- eval_2026 %>%
+    group_by(across(all_of(state_group_cols))) %>%
+    summarise(
+      cases_2026 = sum(cases_2026),
+      deaths_2026 = sum(deaths_2026),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(cases_2026))
+
+  print(state_2026, n = Inf, width = Inf)
+
+} else {
+  state_2026 <- tibble()
+  warning("State metadata unavailable; state summary skipped.")
+}
+```
+
+# 11. Compact external-validation figure
+
+```{r external-validation-figure, fig.width=7.4, fig.height=4.2}
+plot_external <- external_validation_top_third %>%
+  select(
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  pivot_longer(
+    cols = c(cases_capture_share, deaths_capture_share),
+    names_to = "outcome",
+    values_to = "capture_share"
+  ) %>%
+  mutate(
+    outcome = recode(
+      outcome,
+      cases_capture_share = "Observed 2026 cases",
+      deaths_capture_share = "Observed 2026 deaths"
+    ),
+    rule = factor(
+      rule,
+      levels = c(
+        "Transmission-only",
+        "Age/severity-only",
+        "Expected-burden"
+      )
+    )
+  )
+
+p_external_2026 <- ggplot(
+  plot_external,
+  aes(x = rule, y = capture_share, shape = rule)
+) +
+  geom_hline(
+    yintercept = TOP_N / EXPECTED_N_MUNI,
+    linetype = "dotted",
+    linewidth = 0.5
+  ) +
+  geom_point(size = 3) +
+  facet_wrap(~ outcome, nrow = 1) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1)
+  ) +
+  labs(
+    x = NULL,
+    y = "Share captured"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 25, hjust = 1)
+  )
+
+print(p_external_2026)
+```
+
+# 12. Save outputs
+
+```{r save-outputs}
+readr::write_csv(
+  eval_2026,
+  file.path(OUT_DIR, "external_validation_municipality_2026.csv")
+)
+
+readr::write_csv(
+  external_validation_top_third,
+  file.path(OUT_DIR, "external_validation_top_third_2026.csv")
+)
+
+readr::write_csv(
+  ranked_2026,
+  file.path(OUT_DIR, "external_validation_municipality_ranks_2026.csv")
+)
+
+readr::write_csv(
+  pilot_eval,
+  file.path(OUT_DIR, "external_validation_named_pilot_municipalities_2026.csv")
+)
+
+readr::write_csv(
+  death_age_2026,
+  file.path(OUT_DIR, "external_validation_death_age_bands_2026.csv")
+)
+
+readr::write_csv(
+  age_window_summary,
+  file.path(OUT_DIR, "external_validation_death_age_window_summary_2026.csv")
+)
+
+if (nrow(dourados_result) > 0L) {
+  readr::write_csv(
+    dourados_result,
+    file.path(OUT_DIR, "external_validation_dourados_2026.csv")
+  )
+}
+
+if (exists("state_2026") && nrow(state_2026) > 0L) {
+  readr::write_csv(
+    state_2026,
+    file.path(OUT_DIR, "external_validation_state_summary_2026.csv")
+  )
+}
+
+if (exists("rolling_external_score")) {
+  readr::write_csv(
+    rolling_external_score,
+    file.path(OUT_DIR, "external_validation_rolling_2025_prediction_vs_2026.csv")
+  )
+}
+
+ggsave(
+  file.path(OUT_DIR, "external_validation_top_third_2026.png"),
+  p_external_2026,
+  width = 7.4,
+  height = 4.2,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(OUT_DIR, "external_validation_top_third_2026.pdf"),
+  p_external_2026,
+  width = 7.4,
+  height = 4.2
+)
+
+cat("\nSaved File 18 outputs to:\n", OUT_DIR, "\n")
+```
+
+# 13. Final checks
+
+```{r final-checks}
+stopifnot(
+  nrow(pilot_eval) == 14L,
+  nrow(external_validation_top_third) == 3L,
+  all(external_validation_top_third$n_selected == TOP_N),
+  all(
+    is.na(external_validation_top_third$cases_capture_share) |
+      (
+        external_validation_top_third$cases_capture_share >= 0 &
+        external_validation_top_third$cases_capture_share <= 1
+      )
+  ),
+  all(
+    is.na(external_validation_top_third$deaths_capture_share) |
+      (
+        external_validation_top_third$deaths_capture_share >= 0 &
+        external_validation_top_third$deaths_capture_share <= 1
+      )
+  )
+)
+
+cat("\n============================================================\n")
+cat("2026 EXTERNAL VALIDATION COMPLETE\n")
+cat("Confirmed cases:", sum(eval_2026$cases_2026), "\n")
+cat("Confirmed deaths:", sum(eval_2026$deaths_2026), "\n")
+cat("Latest confirmed-case notification date in analytic subset:",
+    as.character(max(chik26_confirmed$DT_SIN_PRI, na.rm = TRUE)), "\n")
+cat("Latest notification date in raw 2026 file:",
+    as.character(max(Chik_2026$DT_SIN_PRI, na.rm = TRUE)), "\n")
+cat("Matched top-third:", TOP_N, "of", EXPECTED_N_MUNI, "municipalities\n")
+cat("============================================================\n")
+```
+
+
+Summary Stats
+```{r}
+
+external_validation_top_third %>%
+  dplyr::select(
+    rule,
+    cases_captured,
+    cases_total,
+    cases_capture_share,
+    deaths_captured,
+    deaths_total,
+    deaths_capture_share
+  ) %>%
+  print(width = Inf)
+
+
+
+plot_external_bar <- external_validation_top_third %>%
+  dplyr::select(
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(cases_capture_share, deaths_capture_share),
+    names_to = "outcome",
+    values_to = "capture"
+  ) %>%
+  dplyr::mutate(
+    outcome = dplyr::recode(
+      outcome,
+      cases_capture_share = "A  Reported cases",
+      deaths_capture_share = "B  Reported deaths"
+    ),
+    rule = factor(
+      rule,
+      levels = c(
+        "Transmission-only",
+        "Age/severity-only",
+        "Expected-burden"
+      )
+    )
+  )
+
+
+cols <- c(
+  "Transmission-only" = "#D55E00",
+  "Age/severity-only" = "#009E73",
+  "Expected-burden" = "#0072B2"
+)
+
+p_external_clean <- ggplot(
+  plot_external_bar,
+  aes(
+    x = capture,
+    y = rule,
+    fill = rule
+  )
+) +
+  geom_col(
+    width = 0.58,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    aes(
+      label = scales::percent(capture, accuracy = 0.1)
+    ),
+    hjust = -0.15,
+    size = 3.5
+  ) +
+  facet_wrap(
+    ~ outcome,
+    nrow = 1
+  ) +
+  scale_fill_manual(values = cols) +
+  scale_x_continuous(
+  labels = scales::percent_format(accuracy = 1),
+  limits = c(0, 1.10),
+  breaks = c(0, 0.25, 0.50, 0.75, 1.00),
+  expand = expansion(mult = c(0, 0))
+) +
+  labs(
+    x = "Share of observed 2026 burden captured",
+    y = NULL
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(
+      face = "bold",
+      hjust = 0
+    ),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(1.2, "lines")
+  )
+
+p_external_clean
+
+```
+
+
+# Interpretation guardrails
+
+- The 2026 data are partial/provisional surveillance data. Always state the actual file
+  extraction/download date in the manuscript once confirmed. Do not substitute the latest
+  notification date in the analytic subset for the extraction date.
+- This is external corroboration, not a completed full-year 2026 estimate.
+- Captured cases and deaths are observed notified outcomes; do not describe them as outcomes prevented.
+- Do not infer vaccine effectiveness from municipality-level 2026 outcomes or from Dourados.
+- The named pilot list in this file is the subset listed in the revision plan and should be
+  checked against the final official Ministry list before submission.
+- The optional `forecast_annual_predict_2025.csv` comparison is a through-2024 forecast for
+  target year 2025. Do not call it a through-2025 prediction of 2026.
+- A genuine through-2025 -> 2026 INLA forecast would be a separate model fit and is intentionally
+  not substituted or implied by this file.

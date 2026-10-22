@@ -1,0 +1,226 @@
+---
+title: "01 - Data Import and Cleaning"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("00_setup.R")
+```
+
+## Import raw SINAN files
+
+The primary study period is 2016-2025. The 2026 file is kept separate for held-out temporal validation and is never included in the primary analytic dataset.
+
+```{r import}
+CHIK16 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR16.dbc"))
+CHIK17 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR17.dbc"))
+CHIK18 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR18.dbc"))
+CHIK19 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR19.dbc"))
+CHIK20 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR20.dbc"))
+CHIK21 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR21.dbc"))
+CHIK22 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR22.dbc"))
+CHIK23 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR23.dbc"))
+CHIK24 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR24.dbc"))
+CHIK25 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR25.dbc"))
+
+# Held-out 2026 data; never bind into Chik_total.
+CHIK26 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR26.dbc"))
+```
+
+## Construct the 2016-2025 analytic dataset
+
+```{r combine}
+chik_list <- list(
+  CHIK16, CHIK17, CHIK18, CHIK19, CHIK20,
+  CHIK21, CHIK22, CHIK23, CHIK24, CHIK25
+)
+
+Chik_notifications <- bind_rows(chik_list) %>%
+  mutate(DT_SIN_PRI = as.Date(DT_SIN_PRI))
+
+Chik_2026 <- CHIK26 %>%
+  mutate(DT_SIN_PRI = as.Date(DT_SIN_PRI))
+
+# Final primary case definition used throughout the revised pipeline.
+Chik_total <- Chik_notifications %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(DT_SIN_PRI),
+    DT_SIN_PRI >= as.Date("2016-01-01"),
+    DT_SIN_PRI <= as.Date("2025-12-31")
+  ) %>%
+  mutate(
+    year_all   = as.integer(format(DT_SIN_PRI, "%Y")),
+    year       = format(DT_SIN_PRI, "%Y"),
+    month      = format(DT_SIN_PRI, "%m"),
+    year_month = format(DT_SIN_PRI, "%Y-%m")
+  )
+
+stopifnot(
+  all(Chik_total$year_all >= 2016 & Chik_total$year_all <= 2025),
+  all(Chik_total$CLASSI_FIN %in% c(1, 13))
+)
+
+# Useful audit table retained in the rendered notebook.
+chik_cases_by_year <- Chik_total %>%
+  count(year_all, name = "cases")
+
+chik_cases_by_year
+```
+
+## Decode age and derive analysis variables
+
+`NU_IDADE_N` uses a four-digit coding scheme in which the first digit identifies the unit: 1 = hour, 2 = day, 3 = month, and 4 = year.
+
+```{r derived-variables}
+decode_age_years <- function(NU_IDADE_N) {
+  unit_code <- floor(NU_IDADE_N / 1000)
+  value <- NU_IDADE_N %% 1000
+
+  dplyr::case_when(
+    unit_code == 1 ~ value / (24 * 365),
+    unit_code == 2 ~ value / 365,
+    unit_code == 3 ~ value / 12,
+    unit_code == 4 ~ value,
+    TRUE ~ NA_real_
+  )
+}
+
+age_levels <- c(
+  "< 1", "1-4", "5-9", "10-14", "15-19", "20-24", "25-29",
+  "30-34", "35-39", "40-44", "45-49", "50-54", "55-59",
+  "60-64", "65-69", "70-74", "75-79", "80-84", "85-89",
+  "90-94", "95-99", "100+"
+)
+
+Chik_total <- Chik_total %>%
+  mutate(
+    case_status = if_else(EVOLUCAO == 2, "Death", "Confirmed", missing = "Confirmed"),
+    age_years = decode_age_years(NU_IDADE_N),
+    virus = "Chikungunya",
+    age_group = case_when(
+      age_years >= 0   & age_years < 1   ~ "< 1",
+      age_years >= 1   & age_years < 5   ~ "1-4",
+      age_years >= 5   & age_years < 10  ~ "5-9",
+      age_years >= 10  & age_years < 15  ~ "10-14",
+      age_years >= 15  & age_years < 20  ~ "15-19",
+      age_years >= 20  & age_years < 25  ~ "20-24",
+      age_years >= 25  & age_years < 30  ~ "25-29",
+      age_years >= 30  & age_years < 35  ~ "30-34",
+      age_years >= 35  & age_years < 40  ~ "35-39",
+      age_years >= 40  & age_years < 45  ~ "40-44",
+      age_years >= 45  & age_years < 50  ~ "45-49",
+      age_years >= 50  & age_years < 55  ~ "50-54",
+      age_years >= 55  & age_years < 60  ~ "55-59",
+      age_years >= 60  & age_years < 65  ~ "60-64",
+      age_years >= 65  & age_years < 70  ~ "65-69",
+      age_years >= 70  & age_years < 75  ~ "70-74",
+      age_years >= 75  & age_years < 80  ~ "75-79",
+      age_years >= 80  & age_years < 85  ~ "80-84",
+      age_years >= 85  & age_years < 90  ~ "85-89",
+      age_years >= 90  & age_years < 95  ~ "90-94",
+      age_years >= 95  & age_years < 100 ~ "95-99",
+      age_years >= 100 & age_years <= 120 ~ "100+",
+      TRUE ~ NA_character_
+    ),
+    age_group = factor(age_group, levels = age_levels, ordered = TRUE),
+    race_label = case_when(
+      CS_RACA == 1 ~ "White",
+      CS_RACA == 2 ~ "Black",
+      CS_RACA == 3 ~ "Asian",
+      CS_RACA == 4 ~ "Pardo (Mixed)",
+      CS_RACA == 5 ~ "Indigenous",
+      CS_RACA == 9 ~ "Unknown",
+      TRUE ~ "Unspecified"
+    ),
+    age_group_surv10 = case_when(
+      !is.na(age_years) & age_years < 1  ~ "<1",
+      age_years >= 1  & age_years < 10   ~ "1-9",
+      age_years >= 10 & age_years < 20   ~ "10-19",
+      age_years >= 20 & age_years < 30   ~ "20-29",
+      age_years >= 30 & age_years < 40   ~ "30-39",
+      age_years >= 40 & age_years < 50   ~ "40-49",
+      age_years >= 50 & age_years < 60   ~ "50-59",
+      age_years >= 60 & age_years < 70   ~ "60-69",
+      age_years >= 70 & age_years < 80   ~ "70-79",
+      age_years >= 80 & age_years <= 120 ~ ">=80",
+      TRUE ~ NA_character_
+    ),
+    age_group_surv10 = factor(
+      age_group_surv10,
+      levels = c(
+        "<1", "1-9", "10-19", "20-29", "30-39",
+        "40-49", "50-59", "60-69", "70-79", ">=80"
+      ),
+      ordered = TRUE
+    )
+  )
+
+# Legacy object name retained because downstream scripts still use it.
+combined_all <- Chik_total
+```
+
+## Analytic population checks
+
+```{r sanity-checks}
+total_notifications <- nrow(Chik_notifications)
+missing_date <- sum(is.na(Chik_notifications$DT_SIN_PRI))
+
+out_of_range <- Chik_notifications %>%
+  filter(
+    !is.na(DT_SIN_PRI),
+    DT_SIN_PRI < as.Date("2016-01-01") |
+      DT_SIN_PRI > as.Date("2025-12-31")
+  ) %>%
+  nrow()
+
+eligible_date_notifications <- Chik_notifications %>%
+  filter(
+    !is.na(DT_SIN_PRI),
+    DT_SIN_PRI >= as.Date("2016-01-01"),
+    DT_SIN_PRI <= as.Date("2025-12-31")
+  )
+
+not_confirmed <- eligible_date_notifications %>%
+  filter(!(CLASSI_FIN %in% c(1, 13))) %>%
+  nrow()
+
+final_n <- nrow(Chik_total)
+reconciled_n <- total_notifications - missing_date - out_of_range - not_confirmed
+
+# Use decoded age rather than the raw field so invalid age codes are also detected.
+n_missing_or_invalid_age <- sum(is.na(Chik_total$age_years))
+n_missing_or_invalid_sex <- sum(is.na(Chik_total$CS_SEXO) | !(Chik_total$CS_SEXO %in% c("M", "F")))
+
+analytic_population_check <- tibble(
+  item = c(
+    "Raw notifications, 2016-2025 source files",
+    "Missing notification date",
+    "Notification date outside study period",
+    "Not confirmed by CLASSI_FIN definition",
+    "Final confirmed analytic sample",
+    "Missing/invalid decoded age",
+    "Missing/invalid sex"
+  ),
+  n = c(
+    total_notifications,
+    missing_date,
+    out_of_range,
+    not_confirmed,
+    final_n,
+    n_missing_or_invalid_age,
+    n_missing_or_invalid_sex
+  )
+)
+
+analytic_population_check
+
+stopifnot(
+  reconciled_n == final_n,
+  nrow(combined_all) == nrow(Chik_total),
+  identical(combined_all, Chik_total)
+)
+```

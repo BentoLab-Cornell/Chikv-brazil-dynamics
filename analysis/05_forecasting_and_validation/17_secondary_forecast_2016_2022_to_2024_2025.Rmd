@@ -1,0 +1,360 @@
+---
+title: "17 - Secondary Longer-Horizon Forecast: 2016-2022 to 2024-2025 (Final Post-HPC)"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+This is the finalized secondary longer-horizon forecast analysis.
+
+The computationally expensive INLA fit was completed on the Cornell Seneca HPC cluster.
+This local notebook **does not refit the model**. It reads the downloaded HPC outputs from
+
+`~/Downloads/inla_results/secondary_forecast_2016_2022/`
+
+and reproduces the final scoring table, rank correlations, figure, and interpretation.
+
+Model design:
+
+- training outcomes: 2016-2022 only;
+- 2023 outcomes held out as a forecasting bridge;
+- evaluation outcomes: aggregate 2024-2025 burden;
+- fixed municipality universe: 5,570 municipalities;
+- matched top-third coverage: 1,857 municipalities;
+- comparison rules:
+  1. through-2022 INLA forecast;
+  2. observed 2022 cases;
+  3. age-only ranking using 2022 population age structure.
+
+No 2023-2025 outcomes were used as observed responses in the fit.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(ggplot2)
+  library(scales)
+})
+
+EXPECTED_N_MUNI <- 5570L
+TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
+
+RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+OUT_DIR <- file.path(RESULT_ROOT, "secondary_forecast_2016_2022")
+FIT_DIR <- file.path(OUT_DIR, "fits")
+PRED_DIR <- file.path(OUT_DIR, "predictions")
+SCORE_DIR <- file.path(OUT_DIR, "scoring")
+
+FIT_PATH <- file.path(
+  FIT_DIR,
+  "fit_secondary_through_2022_predict_2023_2025.rds"
+)
+
+PRED_PATH <- file.path(
+  PRED_DIR,
+  "forecast_secondary_2024_2025.csv"
+)
+
+PERF_PATH <- file.path(
+  SCORE_DIR,
+  "secondary_forecast_performance_2016_2022_to_2024_2025.csv"
+)
+
+COR_PATH <- file.path(
+  SCORE_DIR,
+  "secondary_forecast_rank_correlations_2016_2022.csv"
+)
+
+RANK_PATH <- file.path(
+  SCORE_DIR,
+  "secondary_forecast_municipality_rankings_2024_2025.csv"
+)
+
+required_paths <- c(PRED_PATH, PERF_PATH, COR_PATH, RANK_PATH)
+missing_paths <- required_paths[!file.exists(required_paths)]
+
+if (length(missing_paths) > 0L) {
+  stop(
+    "Downloaded File 17 outputs are missing:\n",
+    paste(missing_paths, collapse = "\n")
+  )
+}
+
+cat("HPC fit RDS present:", file.exists(FIT_PATH), "\n")
+cat("Prediction:", PRED_PATH, "\n")
+cat("Scoring:", SCORE_DIR, "\n")
+```
+
+# 1. Read finalized HPC outputs
+
+```{r read-hpc-results}
+secondary_pred <- readr::read_csv(
+  PRED_PATH,
+  show_col_types = FALSE,
+  col_types = cols(
+    code_muni = col_character(),
+    .default = col_guess()
+  )
+)
+
+secondary_performance <- readr::read_csv(
+  PERF_PATH,
+  show_col_types = FALSE
+)
+
+rank_correlations <- readr::read_csv(
+  COR_PATH,
+  show_col_types = FALSE
+)
+
+eval_secondary <- readr::read_csv(
+  RANK_PATH,
+  show_col_types = FALSE,
+  col_types = cols(
+    code_muni = col_character(),
+    .default = col_guess()
+  )
+)
+
+stopifnot(
+  nrow(secondary_pred) == EXPECTED_N_MUNI,
+  nrow(eval_secondary) == EXPECTED_N_MUNI,
+  nrow(secondary_performance) == 3L,
+  all(secondary_performance$n_selected == TOP_N)
+)
+
+cat("Municipalities:", nrow(eval_secondary), "\n")
+cat("Matched top-third:", TOP_N, "\n")
+```
+
+# 2. Final performance
+
+```{r final-performance}
+secondary_performance %>%
+  mutate(
+    cases_capture_pct = 100 * cases_capture_share,
+    deaths_capture_pct = 100 * deaths_capture_share
+  ) %>%
+  select(
+    rule,
+    n_selected,
+    cases_captured,
+    cases_total,
+    cases_capture_pct,
+    deaths_captured,
+    deaths_total,
+    deaths_capture_pct
+  ) %>%
+  print(width = Inf)
+```
+
+The finalized HPC results are:
+
+- through-2022 INLA forecast: 277,362 / 325,936 cases = 85.1%; 316 / 355 deaths = 89.0%;
+- 2022 case ranking: 244,753 / 325,936 cases = 75.1%; 283 / 355 deaths = 79.7%;
+- age-only ranking: 49,919 / 325,936 cases = 15.3%; 48 / 355 deaths = 13.5%.
+
+# 3. Rank correlations
+
+```{r final-rank-correlations}
+print(rank_correlations, width = Inf)
+```
+
+The through-2022 forecast is related to, but not equivalent to, the 2022 case ranking
+(Spearman rho approximately 0.665). Its correlation with the age-only ranking is negative
+(rho approximately -0.431).
+
+# 4. Final figure
+
+```{r final-figure, fig.width=7.4, fig.height=4.2}
+plot_secondary <- secondary_performance %>%
+  select(
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  pivot_longer(
+    cols = c(cases_capture_share, deaths_capture_share),
+    names_to = "outcome",
+    values_to = "capture_share"
+  ) %>%
+  mutate(
+    outcome = recode(
+      outcome,
+      cases_capture_share = "Observed cases, 2024-2025",
+      deaths_capture_share = "Observed deaths, 2024-2025"
+    ),
+    rule = factor(
+      rule,
+      levels = c(
+        "Through-2022 INLA forecast",
+        "2022 cases",
+        "Age-only (2022)"
+      )
+    )
+  )
+
+p_secondary <- ggplot(
+  plot_secondary,
+  aes(x = rule, y = capture_share, shape = rule)
+) +
+  geom_hline(
+    yintercept = TOP_N / EXPECTED_N_MUNI,
+    linetype = "dotted",
+    linewidth = 0.5
+  ) +
+  geom_point(size = 3) +
+  facet_wrap(~ outcome, nrow = 1) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1)
+  ) +
+  labs(
+    x = NULL,
+    y = "Share captured"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 25, hjust = 1)
+  )
+
+print(p_secondary)
+```
+
+# 5. Save local presentation outputs
+
+The authoritative numerical CSVs are the downloaded HPC files. This section only
+recreates the figure locally.
+
+```{r save-local-figure}
+ggsave(
+  file.path(SCORE_DIR, "secondary_forecast_capture_2024_2025.png"),
+  p_secondary,
+  width = 7.4,
+  height = 4.2,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(SCORE_DIR, "secondary_forecast_capture_2024_2025.pdf"),
+  p_secondary,
+  width = 7.4,
+  height = 4.2
+)
+
+cat("Final File 17 outputs verified in:", OUT_DIR, "\n")
+```
+
+
+```{r}
+
+secondary_plot <- secondary_performance %>%
+  dplyr::select(
+    rule,
+    cases_capture_share,
+    deaths_capture_share
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(cases_capture_share, deaths_capture_share),
+    names_to = "outcome",
+    values_to = "capture"
+  ) %>%
+  dplyr::mutate(
+    outcome = dplyr::recode(
+      outcome,
+      cases_capture_share = "A  Reported cases",
+      deaths_capture_share = "B  Reported deaths"
+    ),
+    rule = factor(
+      rule,
+      levels = c(
+        "Age-only (2022)",
+        "2022 cases",
+        "Through-2022 INLA forecast"
+      )
+    )
+  )
+
+
+library(ggplot2)
+library(scales)
+
+cols <- c(
+  "Through-2022 INLA forecast" = "#0072B2",
+  "2022 cases" = "#D55E00",
+  "Age-only (2022)" = "#009E73"
+)
+
+p_secondary_clean <- ggplot(
+  secondary_plot,
+  aes(
+    x = capture,
+    y = rule,
+    fill = rule
+  )
+) +
+  geom_col(
+    width = 0.58,
+    show.legend = FALSE
+  ) +
+  geom_text(
+    aes(
+      label = percent(capture, accuracy = 0.1)
+    ),
+    hjust = -0.15,
+    size = 3.5
+  ) +
+  facet_wrap(
+    ~ outcome,
+    nrow = 1
+  ) +
+  scale_fill_manual(values = cols) +
+  scale_x_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = c(0, 1.05),
+    breaks = c(0, 0.25, 0.50, 0.75, 1.00),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    x = "Share of subsequently observed burden captured",
+    y = NULL
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(
+      face = "bold",
+      hjust = 0
+    ),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    panel.spacing = unit(1.2, "lines")
+  )
+
+p_secondary_clean
+
+```
+# Final interpretation
+
+Across this deliberately longer-horizon test, the through-2022 INLA ranking captured
+85.1% of observed 2024-2025 cases and 89.0% of observed deaths within the top one-third
+of municipalities. The corresponding 2022 case ranking captured 75.1% of cases and
+79.7% of deaths, while the age-only ranking captured 15.3% of cases and 13.5% of deaths.
+
+This analysis complements, rather than replaces, the nine one-year-ahead rolling-origin
+evaluations. It tests whether a stale ranking retains useful targeting information when it is
+not refreshed annually.
+
+# Interpretation guardrails
+
+- Do not describe the capture shares as cases or deaths prevented.
+- Do not imply that the longer-horizon model always outperforms every comparator under every outcome or year; this analysis is an aggregate 2024-2025 test.
+- The 2023 outcomes were also held out and served only as a forecast bridge.
+- The final model fit was performed on Seneca HPC; this notebook reads the downloaded results and does not rerun INLA.
