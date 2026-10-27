@@ -1,12 +1,25 @@
 # Shared configuration and packages
 
-# Run numbered scripts with analysis/ as the working directory.
-# Raw and cleaned input datasets are committed to data/ in this repository.
-PROJECT_ROOT <- normalizePath("..", winslash = "/", mustWork = TRUE)
-RAW_DBC_DIR <- file.path(PROJECT_ROOT, "data")
-CHIK_DATA_DIR <- file.path(RAW_DBC_DIR, "chikungunya")
-IBGE_DOWNLOADS_DIR <- file.path(RAW_DBC_DIR, "population")
-stopifnot(dir.exists(CHIK_DATA_DIR), dir.exists(IBGE_DOWNLOADS_DIR))
+# Run numbered scripts with analysis/ as the working directory, or use
+# scripts/run_module.R. Raw inputs remain in the repository's root folders.
+.paths_file <- if (file.exists("00_paths.R")) "00_paths.R" else file.path("analysis", "00_paths.R")
+source(.paths_file, local = TRUE)
+rm(.paths_file)
+
+# Report every missing shared dependency before attaching packages.
+.shared_packages <- c(
+  "read.dbc", "dplyr", "tidyr", "readr", "readxl", "stringr", "lubridate", "tibble",
+  "ggplot2", "scales", "viridis", "RColorBrewer", "patchwork", "gridGraphics",
+  "cowplot", "ggrepel", "sf", "geobr", "spdep", "INLA", "WaveletComp", "survival",
+  "survminer", "ggsurvfit", "broom", "gtsummary", "UpSetR", "purrr"
+)
+.missing_packages <- setdiff(.shared_packages, rownames(installed.packages()))
+if (length(.missing_packages)) {
+  stop("Missing shared packages: ", paste(.missing_packages, collapse = ", "),
+       ". See docs/REPRODUCIBILITY.md; run scripts/preflight.R for details.", call. = FALSE)
+}
+rm(.shared_packages, .missing_packages)
+ensure_results_dir()
 
 # Data import / wrangling
 library(read.dbc)

@@ -224,3 +224,9 @@ stopifnot(
   identical(combined_all, Chik_total)
 )
 ```
+
+## Save the analytic object for downstream sessions
+
+```{r save-analytic-object}
+saveRDS(Chik_total, result_path("Chik_total.rds"))
+```

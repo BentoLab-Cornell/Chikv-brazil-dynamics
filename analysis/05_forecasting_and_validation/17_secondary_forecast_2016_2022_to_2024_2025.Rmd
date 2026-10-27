@@ -12,7 +12,7 @@ This is the finalized secondary longer-horizon forecast analysis.
 The computationally expensive INLA fit was completed on the Cornell Seneca HPC cluster.
 This local notebook **does not refit the model**. It reads the downloaded HPC outputs from
 
-`~/Downloads/inla_results/secondary_forecast_2016_2022/`
+`RESULTS_DIR/secondary_forecast_2016_2022/`
 
 and reproduces the final scoring table, rank correlations, figure, and interpretation.
 
@@ -31,6 +31,8 @@ Model design:
 No 2023-2025 outcomes were used as observed responses in the fit.
 
 ```{r setup, include=FALSE}
+source("00_paths.R")
+ensure_results_dir()
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
 
 suppressPackageStartupMessages({
@@ -44,7 +46,7 @@ suppressPackageStartupMessages({
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+RESULT_ROOT <- RESULTS_DIR
 OUT_DIR <- file.path(RESULT_ROOT, "secondary_forecast_2016_2022")
 FIT_DIR <- file.path(OUT_DIR, "fits")
 PRED_DIR <- file.path(OUT_DIR, "predictions")

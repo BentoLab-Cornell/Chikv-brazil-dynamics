@@ -30,6 +30,8 @@ No INLA refit is performed. This file uses the saved monthly posterior IRR surfa
 the primary model.
 
 ```{r setup, include=FALSE}
+source("00_paths.R")
+ensure_results_dir()
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
 
 suppressPackageStartupMessages({
@@ -43,7 +45,7 @@ suppressPackageStartupMessages({
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+RESULT_ROOT <- RESULTS_DIR
 OUT_DIR <- file.path(RESULT_ROOT, "reporting_completeness_sensitivity")
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 

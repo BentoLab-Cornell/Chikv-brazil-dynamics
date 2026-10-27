@@ -14,7 +14,7 @@ source("00_setup.R")
 # ------------------------------------------------------------------
 STUDY_YEARS <- 2016:2025
 EXPECTED_N_HR <- 439L
-RESULT_DIR <- path.expand("~/Downloads/inla_results")
+RESULT_DIR <- RESULTS_DIR
 dir.create(RESULT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # This file uses the cleaned confirmed-case data and the municipality-year

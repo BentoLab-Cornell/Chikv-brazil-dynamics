@@ -22,16 +22,16 @@ source("00_setup.R")
 # 06 is the sole source of municipality-month posterior IRRs.
 # ============================================================
 
-inla_results_dir <- path.expand("~/Downloads/inla_results")
+inla_results_dir <- RESULTS_DIR
 
 irr_path <- file.path(
   inla_results_dir,
   "st_rate_chik_region_2016_2025.rds"
 )
 
-# Revised Step-02 files are saved in the working/project directory.
-pop_total_path <- "pop_panel_total.rds"
-pop_age_path   <- "pop_panel_age.rds"
+# Revised Step-02 files are saved in the centrally configured results directory.
+pop_total_path <- result_path("pop_panel_total.rds")
+pop_age_path   <- result_path("pop_panel_age.rds")
 
 required_files <- c(
   irr_path,
@@ -269,15 +269,15 @@ corner_blue   <- "#185FA5"
 corner_red    <- "#A32D2D"
 corner_purple <- "#3C3489"
 
-if (!dir.exists("data")) dir.create("data")
+dir.create(RESULTS_DIR, recursive = TRUE, showWarnings = FALSE)
 
-if (!file.exists("data/mun_sf_simplified.rds")) {
+if (!file.exists(result_path("mun_sf_simplified.rds"))) {
   mun_sf_fig <- read_municipality(year = 2020, simplified = TRUE, showProgress = FALSE) %>%
     st_transform(4326) %>%
     mutate(code_muni = str_pad(substr(as.character(code_muni), 1, 6), 6, pad = "0"))
-  saveRDS(mun_sf_fig, "data/mun_sf_simplified.rds")
+  saveRDS(mun_sf_fig, result_path("mun_sf_simplified.rds"))
 } else {
-  mun_sf_fig <- readRDS("data/mun_sf_simplified.rds")
+  mun_sf_fig <- readRDS(result_path("mun_sf_simplified.rds"))
 }
 
 build_panel_a <- function(mun_data, mun_sf, subtitle = "A  Bivariate priority map") {
