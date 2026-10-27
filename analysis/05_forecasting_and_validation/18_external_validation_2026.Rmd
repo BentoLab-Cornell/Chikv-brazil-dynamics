@@ -31,7 +31,7 @@ source("00_setup.R")
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+RESULT_ROOT <- RESULTS_DIR
 OUT_DIR <- file.path(RESULT_ROOT, "external_validation_2026")
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -133,11 +133,7 @@ cat(
 # 3. Fixed municipality lookup
 
 ```{r municipality-lookup}
-MUNI_PATH_CANDIDATES <- c(
-  file.path(getwd(), "muni_sf_2020.rds"),
-  file.path(RESULT_ROOT, "muni_sf_2020.rds"),
-  path.expand("~/muni_sf_2020.rds")
-)
+MUNI_PATH_CANDIDATES <- result_path("muni_sf_2020.rds")
 
 muni_hit <- MUNI_PATH_CANDIDATES[file.exists(MUNI_PATH_CANDIDATES)]
 

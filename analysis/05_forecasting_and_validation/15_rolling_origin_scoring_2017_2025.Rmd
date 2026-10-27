@@ -30,7 +30,7 @@ TARGET_YEARS <- 2017:2025
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-results_dir <- path.expand("~/Downloads/inla_results")
+results_dir <- RESULTS_DIR
 pred_dir <- file.path(results_dir, "rolling_origin", "predictions")
 score_dir <- file.path(results_dir, "rolling_origin", "scoring")
 
@@ -44,10 +44,10 @@ cat("Matched top-third municipality count:", TOP_N, "\n")
 
 ```{r load-inputs}
 if (!exists("pop_panel_age")) {
-  if (!file.exists("pop_panel_age.rds")) {
-    stop("pop_panel_age.rds not found in the working directory.")
+  if (!file.exists(result_path("pop_panel_age.rds"))) {
+    stop("pop_panel_age.rds not found in RESULTS_DIR: ", RESULTS_DIR)
   }
-  pop_panel_age <- readRDS("pop_panel_age.rds")
+  pop_panel_age <- readRDS(result_path("pop_panel_age.rds"))
 }
 
 if (!exists("Chik_total")) {

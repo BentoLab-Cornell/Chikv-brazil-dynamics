@@ -19,6 +19,8 @@ It reads the saved analytic objects directly from RDS files, then performs nine 
 Existing prediction CSVs are detected and skipped automatically. If a fit RDS exists but its prediction CSV is missing, the saved fit is loaded and the prediction is extracted without refitting.
 
 ```{r setup, include=FALSE}
+source("00_paths.R")
+ensure_results_dir()
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
 
 suppressPackageStartupMessages({
@@ -38,7 +40,7 @@ TARGET_YEARS <- 2017:2025
 EXPECTED_N_MUNI <- 5570L
 
 # Main output location used throughout the revision.
-RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+RESULT_ROOT <- RESULTS_DIR
 ROLL_DIR <- file.path(RESULT_ROOT, "rolling_origin")
 FIT_DIR <- file.path(ROLL_DIR, "fits")
 PRED_DIR <- file.path(ROLL_DIR, "predictions")
@@ -46,14 +48,8 @@ PRED_DIR <- file.path(ROLL_DIR, "predictions")
 dir.create(FIT_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(PRED_DIR, recursive = TRUE, showWarnings = FALSE)
 
-# Saved-input search locations.
-# The helper checks the project working directory first, then the revision
-# results folder. Add another directory here if you keep the RDS files elsewhere.
-INPUT_DIRS <- unique(c(
-  normalizePath(".", winslash = "/", mustWork = FALSE),
-  path.expand("~/Downloads/inla_results"),
-  path.expand("~/Downloads")
-))
+# Saved inputs use the same explicit results root in every module.
+INPUT_DIRS <- RESULTS_DIR
 
 find_input <- function(filename) {
   candidates <- file.path(INPUT_DIRS, filename)
@@ -163,7 +159,7 @@ if (length(graph_hit) > 0L) {
   cat("Adjacency graph loaded from:", graph_hit[1], "
 ")
 } else {
-  graph_path <- file.path(ROLL_DIR, "brazil_muni_2020.adj")
+  graph_path <- result_path("brazil_muni_2020.adj")
   cat("Adjacency graph not found; rebuilding at:", graph_path, "
 ")
 
@@ -468,6 +464,7 @@ fit_one_fold <- function(target_year) {
     cat("No saved fit found; starting INLA.\n")
     print(Sys.time())
 
+    require_model_fitting("Module 14 rolling-origin model")
     fit <- INLA::inla(
       forecast_formula,
       family = "nbinomial",
@@ -667,7 +664,7 @@ cat(
 # 10. Final status
 
 ```{r final-status}
-if (length(years_on_disk) == length(TARGET_YEARS)) {
+if (length(setdiff(TARGET_YEARS, years_on_disk)) == 0L) {
 
   cat("\n============================================================\n")
   cat("PRIMARY ROLLING-ORIGIN FORECAST COMPLETE\n")
@@ -689,5 +686,11 @@ if (length(years_on_disk) == length(TARGET_YEARS)) {
   )
   cat("Rerun this file; completed prediction CSVs will be skipped.\n")
   cat("============================================================\n")
+  stop(
+    "Rolling-origin predictions are incomplete. Missing target years: ",
+    paste(setdiff(TARGET_YEARS, years_on_disk), collapse = ", "),
+    ". Restore the missing prediction CSVs or explicitly enable model fitting.",
+    call. = FALSE
+  )
 }
 ```

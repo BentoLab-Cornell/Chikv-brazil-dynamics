@@ -19,7 +19,7 @@ STUDY_START_YEAR <- 2016L
 STUDY_END_YEAR   <- 2025L
 STUDY_YEARS      <- STUDY_START_YEAR:STUDY_END_YEAR
 
-results_dir <- path.expand("~/Downloads/inla_results")
+results_dir <- RESULTS_DIR
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
 stopifnot(
@@ -306,6 +306,7 @@ fit_shared_component_year <- function(
       )
     )
 
+  require_model_fitting("Module 11 shared-component model")
   fit <- inla(
     formula_shared,
     family = "poisson",

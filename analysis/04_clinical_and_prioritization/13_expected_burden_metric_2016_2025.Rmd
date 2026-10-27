@@ -26,7 +26,7 @@ predicted numbers of deaths.
 knitr::opts_chunk$set(echo = TRUE)
 source("00_setup.R")
 
-results_dir <- path.expand("~/Downloads/inla_results")
+results_dir <- RESULTS_DIR
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
@@ -36,20 +36,20 @@ This step uses the already-completed population panels and INLA posterior rates.
 
 ```{r load-inputs}
 if (!exists("pop_panel_total")) {
-  if (!file.exists("pop_panel_total.rds")) stop("pop_panel_total.rds not found.")
-  pop_panel_total <- readRDS("pop_panel_total.rds")
+  if (!file.exists(result_path("pop_panel_total.rds"))) stop("pop_panel_total.rds not found.")
+  pop_panel_total <- readRDS(result_path("pop_panel_total.rds"))
 }
 
 if (!exists("pop_panel_age")) {
-  if (!file.exists("pop_panel_age.rds")) stop("pop_panel_age.rds not found.")
-  pop_panel_age <- readRDS("pop_panel_age.rds")
+  if (!file.exists(result_path("pop_panel_age.rds"))) stop("pop_panel_age.rds not found.")
+  pop_panel_age <- readRDS(result_path("pop_panel_age.rds"))
 }
 
 st_rate_path <- file.path(results_dir, "st_rate_chik_region_2016_2025.rds")
 
 if (!exists("st_rate_chik_region")) {
   if (!file.exists(st_rate_path)) {
-    stop("st_rate_chik_region_2016_2025.rds not found in ~/Downloads/inla_results.")
+    stop("st_rate_chik_region_2016_2025.rds not found in RESULTS_DIR: ", RESULTS_DIR)
   }
   st_rate_chik_region <- readRDS(st_rate_path)
 }
@@ -701,7 +701,7 @@ where the rankings diverge. Positive values indicate relatively higher priority 
 The fourth panel is the categorical communication layer.
 
 ```{r two-product-maps, fig.width=10, fig.height=8}
-muni_sf_path <- "muni_sf_2020.rds"
+muni_sf_path <- result_path("muni_sf_2020.rds")
 
 if (!exists("muni_sf")) {
   if (file.exists(muni_sf_path)) {

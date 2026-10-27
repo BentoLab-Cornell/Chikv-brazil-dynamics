@@ -32,6 +32,8 @@ coverage changes the **total number of outcomes averted**, but not the expected 
 per 1,000 administered doses. The code verifies this rather than hiding it.
 
 ```{r setup, include=FALSE}
+source("00_paths.R")
+ensure_results_dir()
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
 
 suppressPackageStartupMessages({
@@ -64,7 +66,7 @@ DOSE_BUDGET_FRAC_GRID <- c(0.25, 0.50, 0.75)
 N_DRAWS <- 2000L
 SEED <- 20261003L
 
-RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+RESULT_ROOT <- RESULTS_DIR
 OUT_DIR <- file.path(RESULT_ROOT, "averted_burden_sensitivity")
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -78,7 +80,7 @@ PRIORITY_PATH <- file.path(
   "priority_rule_evaluation_municipality_2024_2025.csv"
 )
 
-POP_AGE_PATH <- path.expand("~/pop_panel_age.rds")
+POP_AGE_PATH <- result_path("pop_panel_age.rds")
 
 required_files <- c(
   ST_RATE_PATH,

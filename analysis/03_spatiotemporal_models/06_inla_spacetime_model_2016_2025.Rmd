@@ -34,16 +34,17 @@ library(sf)
 library(spdep)
 library(INLA)
 
-results_dir <- path.expand("~/Downloads/inla_results")
+results_dir <- RESULTS_DIR
 dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
 
 # This revised file assumes:
 #   Chik_total       -- cleaned SINAN chikungunya notifications
 #   pop_panel_total  -- municipality-year population panel
 #
-# The heavy INLA models are intended to run on Seneca HPC. By default,
-# params$run_heavy_models = FALSE, so knitting this document loads saved
-# model objects instead of refitting them.
+# The heavy INLA models were intended to run on Seneca HPC. This notebook
+# loads saved model objects; its fitting calls remain commented out.
+# params$run_heavy_models does not enable them. The executable production
+# fitter and identity of the archived production fits still require verification.
 ```
 
 # Revision summary
@@ -84,8 +85,8 @@ For reproducibility, use the same 2020 municipality ordering that was used to
 construct the stored adjacency graph.
 
 ```{r shapefile-adjacency}
-if (file.exists("muni_sf_2020.rds")) {
-  muni_sf <- readRDS("muni_sf_2020.rds")
+if (file.exists(result_path("muni_sf_2020.rds"))) {
+  muni_sf <- readRDS(result_path("muni_sf_2020.rds"))
 } else {
   muni_sf <- read_municipality(year = 2020) %>%
     st_make_valid()
@@ -103,11 +104,11 @@ stopifnot(length(space_levels) == nrow(muni_sf))
 stopifnot(length(space_levels) == 5570L)
 stopifnot(!anyDuplicated(space_levels))
 
-if (file.exists("brazil_muni_2020.adj")) {
-  g <- INLA::inla.read.graph("brazil_muni_2020.adj")
+if (file.exists(result_path("brazil_muni_2020.adj"))) {
+  g <- INLA::inla.read.graph(result_path("brazil_muni_2020.adj"))
 } else {
   nb <- poly2nb(muni_sf, queen = TRUE)
-  adj_file <- "brazil_muni_2020.adj"
+  adj_file <- result_path("brazil_muni_2020.adj")
   nb2INLA(file = adj_file, nb = nb)
   g <- INLA::inla.read.graph(adj_file)
 }
@@ -322,7 +323,7 @@ formula_chik <- cases ~
 # ============================================================
 # LOCAL RECOVERY MODE
 # Heavy INLA fits are intentionally disabled in this file.
-# Existing HPC results are loaded from ~/Downloads/inla_results.
+# Existing HPC results are loaded from the centrally configured RESULTS_DIR.
 # ============================================================
 cat("\n=== LOCAL RECOVERY MODE ===\n")
 cat("Results directory:", results_dir, "\n")
@@ -355,7 +356,7 @@ if (length(missing_saved_fits) > 0) {
   stop(
     "Missing saved HPC fit(s): ",
     paste(missing_saved_fits, collapse = ", "),
-    "\nCheck ~/Downloads/inla_results before continuing."
+    paste0("\nCheck ", RESULTS_DIR, " before continuing.")
   )
 }
 
