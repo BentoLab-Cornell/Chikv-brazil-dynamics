@@ -1,61 +1,22 @@
-# Geographic distribution and prioritization of reported chikungunya burden in Brazil
+# Chikungunya dynamics in Brazil
 
-Analysis code and data for the revised manuscript **“Geographic distribution and prioritization of reported chikungunya burden in Brazil, 2016–2025.”**
+Code and data for **“Geographic distribution and prioritization of reported chikungunya burden in Brazil, 2016–2025.”** The study examines reported disease burden using historical surveillance and population data; partial 2026 surveillance is held out for temporal evaluation.
 
-The primary analysis uses confirmed SINAN notifications during 2016–2025 on a fixed 5,570-municipality geography. Partial 2026 surveillance is held out for temporal evaluation. The study examines reported burden, not all infections or causal vaccine effectiveness.
+## Getting started
 
-## Scope
-
-- Descriptive temporal and geographic patterns in reported cases and deaths.
-- A negative-binomial spatiotemporal model with an estimated log-population coefficient, BYM2 spatial effects, RW2 time and a Type I interaction; annual health-region shared-component models of cases and deaths.
-- Municipality rankings based on relative fitted incidence, demographic severity burden, their combined score and an incidence-by-population benchmark.
-- Retrospective rolling-origin, longer-horizon and partial-2026 temporal evaluations. These are outcome holdouts using retrospectively assembled population inputs, not documented real-time deployment or independent external-population validation.
-- Illustrative allocation among adults aged 18–59 under equal dose budgets. These static direct-protection scenarios do not estimate realized vaccine impact or product-specific benefits for older adults.
-
-The combined score is uncalibrated. The revised interpretation emphasizes limited additional aggregate burden capture from age weighting beyond population size, and the distinction between matched municipality coverage and matched dose budgets.
-
-The repository also retains ancillary work. Wavelet/phase, survival, symptom, race/ethnicity and earlier categorical-priority analyses are **not final-paper outputs**. Some notebooks mix final-paper and ancillary sections. Historical filenames such as `external_validation`, `expected_burden` and `two_product` remain for traceability; they do not establish the final interpretation. See the [module-to-result map](docs/MODULE_TO_RESULT.md).
-
-## Repository layout
-
-```text
-analysis/       22 numbered research modules (00–21), plus path configuration
-chikungunya/    CHIKBR15.dbc–CHIKBR26.dbc
-population/     cleaned annual municipality-age CSVs, 2015–2025
-zika/           retained historical archive; unused by the revised primary model
-scripts/        explicit module runner and non-analytical preflight checks
-docs/           reproducibility, inventory and result mapping
-results/        generated caches, model outputs and reports; not source data
-```
-
-Keep source files in these existing root-level folders; there is no required `data/` wrapper. Generated outputs default to `results/`. Set `CHIKV_RESULTS_DIR` to an absolute path or a path relative to the repository root to use another output location.
-
-## Start with an inventory check
-
-Run from the repository root with R available:
+From the repository root, check source files and R syntax without running analyses:
 
 ```sh
 Rscript scripts/preflight.R --source-only
-Rscript scripts/preflight.R --report-dir results/preflight
 ```
 
-The first command checks required CHIK/population file presence, R/R Markdown syntax and inventory structure. The second also checks installed-package versions and the required cached-output inventory and writes check/session reports. Neither command runs analyses or downloads data. A full preflight exits with status 2 when required dependencies or cached outputs are missing; that is expected until the production package is complete. Installed-package checks do not test whether packages load or are compatible. Passing a preflight is not validation of results.
+For dependencies and module execution, see the [reproducibility guide](docs/REPRODUCIBILITY.md). Generated outputs go to `results/` by default.
 
-Modules are selected explicitly, for example:
+## Repository guide
 
-```sh
-Rscript scripts/run_module.R 01 02
-```
+- [`analysis/`](analysis/README.md): research modules and execution instructions.
+- [`chikungunya/`](chikungunya/) and [`population/`](population/): surveillance and population inputs.
+- [Data inventory](docs/DATA_INVENTORY.md): source files and expected outputs.
+- [Module-to-result map](docs/MODULE_TO_RESULT.md): manuscript analyses and retained ancillary work.
 
-This example performs data preparation and writes generated caches. Read [execution instructions](analysis/README.md) and the [reproducibility guide](docs/REPRODUCIBILITY.md) before running it. **Do not run all modules 01–21 as a final-paper pipeline.** The runner does not resolve every scientific dependency or identify which sections belong in the paper.
-
-## Reproducibility status
-
-Source surveillance and cleaned population files are included. Exact source-release metadata, the population transformation history, production fits/predictions and fitting logs are not yet fully archived. Module 06 retains commented primary fitting code; enabling an option does not supply an executable, verified production fitter. End-to-end reproduction of the manuscript has **not** been established.
-
-Path configuration and execution helpers are packaging changes. They do not resolve pending scientific checks on geographic assignment, denominators, cohort/age handling or production-result provenance. The model fitting guarded in modules 11 and 14 is disabled by default; no fits are generated by preflight.
-
-- [Reproducibility and execution limits](docs/REPRODUCIBILITY.md)
-- [Data and generated-file inventory](docs/DATA_INVENTORY.md)
-- [Module-to-result map](docs/MODULE_TO_RESULT.md)
-- [Analysis folder guide](analysis/README.md)
+**Reproducibility status:** production fits, provenance and environment details remain incomplete; end-to-end reproduction has not yet been verified. See the reproducibility guide for outstanding requirements.
