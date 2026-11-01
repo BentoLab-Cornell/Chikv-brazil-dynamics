@@ -114,7 +114,7 @@ rather than approximating it.
 
 ```{r by-region-and-wave}
 chik_confirmed_region <- chik_confirmed %>%
-  mutate(code_state = substr(as.character(ID_MUNICIP), 1, 2)) %>%
+  mutate(code_state = substr(as.character(ID_MN_RESI), 1, 2)) %>%
   left_join(state_region_lookup, by = "code_state")
 
 deaths_by_band_region <- chik_confirmed_region %>%

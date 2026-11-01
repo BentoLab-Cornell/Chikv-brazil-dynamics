@@ -390,7 +390,7 @@ print(zone_counts)
 ```{r cfr-by-macroregion}
 cfr_region <- Chik_total %>%
   mutate(year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
-         code_state = substr(as.character(ID_MUNICIP), 1, 2),
+         code_state = substr(as.character(ID_MN_RESI), 1, 2),
          HOSPITALIZ = as.character(HOSPITALIZ)) %>%
   filter(CLASSI_FIN %in% c(1, 13), HOSPITALIZ == "1") %>%
   left_join(state_region_lookup, by = "code_state") %>%   # from 06_inla_spacetime_model.Rmd
@@ -423,13 +423,13 @@ zones select the same municipalities as an age-only rule.
 ```{r supp9-muni-df}
 cases_2425_muni <- Chik_total %>%
   mutate(year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
-         code_muni = str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0")) %>%
+         code_muni = str_pad(substr(as.character(ID_MN_RESI), 1, 6), 6, pad = "0")) %>%
   filter(CLASSI_FIN %in% c(1, 13), year %in% c(2024, 2025)) %>%
   count(code_muni, name = "cases_2425")
 
 deaths_65plus_muni <- Chik_total %>%
   mutate(year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
-         code_muni = str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0"),
+         code_muni = str_pad(substr(as.character(ID_MN_RESI), 1, 6), 6, pad = "0"),
          age_years = decode_age_years(NU_IDADE_N)) %>%    # from 01_data_import_cleaning.Rmd
   filter(EVOLUCAO == 2, year %in% c(2024, 2025), !is.na(age_years), age_years >= 65) %>%
   count(code_muni, name = "deaths_65plus")

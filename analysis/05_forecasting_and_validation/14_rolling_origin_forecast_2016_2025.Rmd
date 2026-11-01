@@ -238,7 +238,7 @@ all_months <- seq(
 confirmed_monthly <- Chik_total %>%
   transmute(
     code_muni = str_pad(
-      substr(as.character(ID_MUNICIP), 1, 6),
+      substr(as.character(ID_MN_RESI), 1, 6),
       width = 6,
       side = "left",
       pad = "0"

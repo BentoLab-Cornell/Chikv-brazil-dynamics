@@ -110,7 +110,7 @@ chik_severity_base <- Chik_total %>%
   mutate(
     year = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
     code_muni = stringr::str_pad(
-      substr(as.character(ID_MUNICIP), 1, 6),
+      substr(as.character(ID_MN_RESI), 1, 6),
       width = 6,
       side = "left",
       pad = "0"
