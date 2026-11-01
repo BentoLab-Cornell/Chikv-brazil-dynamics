@@ -29,6 +29,24 @@ RESULTS_DIR <- normalizePath(.results_setting, winslash = "/", mustWork = FALSE)
 rm(.results_setting)
 
 result_path <- function(...) file.path(RESULTS_DIR, ...)
+
+# Optional production-run roots. Relative overrides are resolved from the repository.
+# Preserving named HPC directories keeps archived fits separate from new analyses.
+configured_path <- function(env_var, default_path) {
+  selected <- Sys.getenv(env_var, unset = "")
+  path <- path.expand(if (nzchar(selected)) selected else default_path)
+  if (!grepl("^(/|[A-Za-z]:[/\\\\])", path)) {
+    path <- file.path(PROJECT_ROOT, path)
+  }
+  normalizePath(path, winslash = "/", mustWork = FALSE)
+}
+rolling_run_dir <- function() {
+  configured_path("CHIKV_ROLLING_RUN_DIR", result_path("hpc_residence_20261028"))
+}
+shared_component_dir <- function() {
+  configured_path("CHIKV_SHARED_COMPONENT_DIR",
+                  result_path("shared_component_residence_20261030"))
+}
 ensure_results_dir <- function() {
   if (!dir.exists(RESULTS_DIR) &&
       !dir.create(RESULTS_DIR, recursive = TRUE, showWarnings = FALSE)) {

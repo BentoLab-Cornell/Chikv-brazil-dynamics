@@ -7,7 +7,7 @@ editor_options:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
+source("00_setup.R")
 
 # Assumes:
 #   - Chik_total from 01_data_import_cleaning.Rmd
@@ -17,9 +17,7 @@ STUDY_START_YEAR <- 2016L
 STUDY_END_YEAR   <- 2025L
 STUDY_YEARS      <- STUDY_START_YEAR:STUDY_END_YEAR
 
-results_dir <- path.expand(
-  "~/Downloads/inla_results/shared_component_residence_20261030"
-)
+results_dir <- shared_component_dir()
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
 stopifnot(
@@ -415,7 +413,12 @@ cat(
 
 # ------------------------------------------------------------
 # 2. Fit only missing or unreadable years
+# Explicit opt-in is mandatory before initiating any INLA fit.
 # ------------------------------------------------------------
+
+if (length(years_missing) > 0L) {
+  require_model_fitting(paste0("shared-component years: ", paste(years_missing, collapse = ", ")))
+}
 
 for (yr in years_missing) {
 

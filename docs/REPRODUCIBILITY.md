@@ -11,8 +11,25 @@ Run the commands below from the repository root. `analysis/00_paths.R` supplies 
 | Source surveillance | `chikungunya/` at the repository root |
 | Source population | `population/` at the repository root |
 | `RESULTS_DIR` | `<repository>/results` |
-| `CHIKV_RESULTS_DIR` | Optional absolute or repository-relative override for generated artifacts |
+| `CHIKV_RESULTS_DIR` | Optional absolute or repository-relative override for generated artifacts and existing fit caches |
+| `CHIKV_ROLLING_RUN_DIR` | Optional absolute or repository-relative override for the historical HPC rolling-run root; default `<RESULTS_DIR>/hpc_residence_20261028` |
+| `CHIKV_SHARED_COMPONENT_DIR` | Optional root containing saved annual shared-component fits; default `<RESULTS_DIR>/shared_component_residence_20261030` |
+| `CHIKV_ROLLING_INPUT_DIR` | Optional input-cache directory for modules 14/15; by default 14 also searches historical run dirs and `RESULTS_DIR`, whereas 15 reads directly from its historical run root |
+| `CHIKV_ROLLING_CASE_CACHE` | Exact basename of the versioned residence cohort consumed by 14/15; defaults to `Chik_total_residence_corrected.rds`. Do not substitute `Chik_total.rds` without checking the input provenance |
+| `CHIKV_MUNI_GEOMETRY_PATH` | Optional path to the verified 2020 municipality geometry RDS, used by module 18 |
 | `CHIKV_ALLOW_MODEL_FITTING` | Fitting guard; active fitting paths in modules 11/14 require explicit `true` |
+
+Environment variables can be supplied without editing source code. For an existing Mac production directory, for example:
+
+```sh
+export CHIKV_RESULTS_DIR="$HOME/Downloads/inla_results"
+export CHIKV_ROLLING_RUN_DIR="$HOME/Downloads/inla_results/hpc_residence_20261028"
+export CHIKV_SHARED_COMPONENT_DIR="$HOME/Downloads/inla_results/shared_component_residence_20261030"
+# Only when the cached rolling inputs live somewhere else:
+# export CHIKV_ROLLING_INPUT_DIR="/absolute/path/to/verified/rolling-inputs"
+```
+
+The date-stamped subdirectories preserve **run identity**, not a constant scientific parameter. Do not merge caches from different runs simply because filenames match. These settings select files; they do not create missing fitted models or validate their scientific provenance.
 
 Keep raw inputs separate from generated outputs. Use an empty output directory for a fresh execution check, or a documented directory containing the matching production caches. A cache's existence alone does not establish compatibility: preserve input hashes, case definition, municipality keys/order, model specification, software versions and the generating commit with each production artifact.
 
@@ -70,15 +87,15 @@ This is a dependency guide, not a tested one-command workflow. Several modules c
 
 Module 06's primary fitting block remains commented. Its `run_heavy_models` parameter alone does not execute that block or establish how the reported fit was produced. Module 17 likewise uses saved outputs rather than implementing its production fitter. The authors must provide the exact production fitting route and fit identity.
 
-The active fitting paths in modules 11 and 14 require explicit `CHIKV_ALLOW_MODEL_FITTING=true` when a fit is needed. This guard prevents unintended computation; it does not verify model specifications or archive missing outputs. No model fitting is required for the preflight or repository packaging checks.
+The active fitting paths in modules 11 and 14 now call `require_model_fitting()` before missing-cache INLA work and require explicit `CHIKV_ALLOW_MODEL_FITTING=true` when a fit is needed. This guard prevents unintended computation; it does not verify model specifications or archive missing outputs. No model fitting is required for the preflight or repository packaging checks.
 
-For reproducing tables and figures from cached runs, supply the artifacts listed in [the inventory](DATA_INVENTORY.md), preserving their relative subdirectories beneath `RESULTS_DIR`. Missing model fits are not replaced with invented or approximate results.
+For reproducing tables and figures from cached runs, supply the artifacts listed in [the inventory](DATA_INVENTORY.md), preserving the actual subdirectories of each historical HPC run. Modules 14/15/17 use their configured historical run root; modules 06/07/12/13/18/19/20/21 use `RESULTS_DIR`. Missing model fits are not replaced with invented or approximate results.
 
 ## 5. Evidence still needed for a reproducible release
 
 1. **Production records:** identify the generating code commit, exact executable fit route, input hashes and keyed output files for each reported result. Supply required fits or sufficient keyed posterior/prediction summaries and the associated logs.
 2. **Source provenance:** archive surveillance extraction/version metadata and the authoritative IBGE sources and transformations used for each annual total/age population file. Distinguish the 2026 extraction date from the latest symptom-onset date.
-3. **Scientific reconciliation:** confirm notification versus residence attribution, fixed-boundary handling, age/cohort rules and their effect on outputs. Packaging changes do not resolve these questions.
+3. **Scientific reconciliation:** the author has confirmed the reported production analyses were run using `ID_MN_RESI` (municipality of residence); formerly notification-attributed code belonged to unrun ancillary analyses and was standardized later. Archive the original production code, cohort/municipality checks and fixed-boundary handling to substantiate that confirmation. The path-only cleanup does not validate the numerical results.
 4. **Model and temporal metadata:** record complete priors/defaults, constraints/scaling, software/hardware/runtime, population vintages, fold inputs and the actual longer-horizon age comparator. Keep outcome-holdout claims distinct from real-time forecasts.
 5. **Final output consistency:** map every submitted figure/table to verified outputs; include the existing residual map and incidence-by-population display where available. Check source-plot labels against final captions. Record unavailable CPO/PIT outputs as a limitation.
 6. **Execution record:** after these items are reconciled, test the documented selected workflow in a fresh session and archive its session/package record and logs. State precisely which paths were tested and which remain untested.

@@ -12,7 +12,8 @@ This is the finalized secondary longer-horizon forecast analysis.
 The computationally expensive INLA fit was completed on the Cornell Seneca HPC cluster.
 This local notebook **does not refit the model**. It reads the downloaded HPC outputs from
 
-`~/Downloads/inla_results/secondary_forecast_2016_2022/`
+the configured historical rolling-run directory (`CHIKV_ROLLING_RUN_DIR`), under
+`results/secondary_forecast_2016_2022_residence/`
 
 and reproduces the final scoring table, rank correlations, figure, and interpretation.
 
@@ -32,6 +33,7 @@ No 2023-2025 outcomes were used as observed responses in the fit.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+source("00_paths.R")
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -44,9 +46,7 @@ suppressPackageStartupMessages({
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-RESULT_ROOT <- path.expand(
-  "~/Downloads/inla_results/hpc_residence_20261028"
-)
+RESULT_ROOT <- rolling_run_dir()
 
 OUT_DIR <- file.path(
   RESULT_ROOT,
@@ -161,11 +161,9 @@ secondary_performance %>%
   print(width = Inf)
 ```
 
-The finalized HPC results are:
-
-- through-2022 INLA forecast: 277,362 / 325,936 cases = 85.1%; 316 / 355 deaths = 89.0%;
-- 2022 case ranking: 244,753 / 325,936 cases = 75.1%; 283 / 355 deaths = 79.7%;
-- age-only ranking: 49,919 / 325,936 cases = 15.3%; 48 / 355 deaths = 13.5%.
+The table above is computed from the saved HPC scoring CSV. Its counts and capture shares
+are authoritative for this specific evaluation; no second manually transcribed numerical
+summary is maintained here.
 
 # 3. Rank correlations
 
@@ -351,9 +349,11 @@ p_secondary_clean
 ```
 # Final interpretation
 
-In the secondary longer-horizon evaluation, the INLA model trained on data through 2022 identified municipalities accounting for 85.5% of reported chikungunya cases and 81.4% of reported deaths during 2024–2025 when selecting the top one-third of municipalities. Ranking municipalities by observed 2022 cases captured 75.6% of cases and 74.9% of deaths, while ranking by the proportion of residents aged 65 years or older captured 15.3% of cases and 16.3% of deaths.
-
-The INLA-based ranking therefore improved case capture by approximately 10.0 percentage points and death capture by 6.5 percentage points compared with the 2022 case-based ranking. The forecast ranking was positively correlated with the 2022 case ranking (Spearman ρ = 0.684) and negatively correlated with the age-only ranking (ρ = −0.459).
+In this secondary longer-horizon evaluation, the model trained through 2022 is evaluated
+against observed 2024–2025 cases and deaths, alongside the 2022 case-based and age-only
+rankings. Read the exact capture shares, percentage-point differences and correlations
+from the loaded performance and correlation tables above. These values should be
+reconciled with the manuscript and its submitted figure before publication.
 
 This secondary analysis complements the nine annual rolling-origin evaluations by examining whether a ranking generated using data available through 2022 retains targeting value for the combined 2024–2025 period without annual updating. These capture shares describe retrospective prioritization performance, not cases or deaths prevented.
 

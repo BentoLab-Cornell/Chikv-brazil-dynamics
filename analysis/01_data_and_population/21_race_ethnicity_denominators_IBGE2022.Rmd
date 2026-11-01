@@ -36,6 +36,7 @@ Important:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+source("00_paths.R")
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -49,7 +50,7 @@ STUDY_START_YEAR <- 2016L
 STUDY_END_YEAR <- 2025L
 DENOM_YEAR <- 2022L
 
-RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+RESULT_ROOT <- RESULTS_DIR
 OUT_DIR <- file.path(RESULT_ROOT, "race_ethnicity_denominators_IBGE2022")
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 

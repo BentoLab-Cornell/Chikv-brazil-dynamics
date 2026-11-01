@@ -12,7 +12,7 @@ This is a source-level map to the revised manuscript, not proof that the availab
 | 03 | `02_descriptive_epidemiology/03_descriptive_epi.Rmd` | Mixed: national temporal summaries supporting Figure 1A and descriptive Results; also contains additional clinical/descriptive summaries |
 | 04 | `02_descriptive_epidemiology/04_geographic_demographic.Rmd` | Mixed: municipal incidence mapping supporting Figure 2 and geographic Results; race and other extra sections are not final-paper findings |
 | 05 | `02_descriptive_epidemiology/05_wavelet_analysis.Rmd` | Ancillary: wavelet/phase/peak timing; absent from the final main/SI despite historical notebook wording |
-| 06 | `03_spatiotemporal_models/06_inla_spacetime_model_2016_2025.Rmd` | Final-paper support: primary fit summaries (Table 1/Figure 3), prior plots (Figure S1), model sensitivities (Tables S1–S2), residual diagnostics and fitted incidence used downstream. Primary fitting code remains commented; saved fits are needed |
+| 06 | `03_spatiotemporal_models/06_inla_spacetime_model_2016_2025.Rmd` | Final-paper support: primary fit summaries (Table 1/Figure 3), prior plots (Supplementary Figure S2); the Pearson residual map is S1, model sensitivities (Tables S1–S2), residual diagnostics and fitted incidence used downstream. Primary fitting code remains commented; saved fits are needed |
 | 07 | `04_clinical_and_prioritization/07_priority_metric_2016_2025.Rmd` | Ancillary: earlier categorical/dual-axis prioritization; replaced in the paper by module 13's continuous comparisons |
 | 08 | `04_clinical_and_prioritization/08_survival_cox_2016_2025.Rmd` | Ancillary: Kaplan–Meier/Cox and clinical progression analyses; not reported in final main/SI |
 | 09 | `02_descriptive_epidemiology/09_symptom_analysis_2016_2025.Rmd` | Ancillary: symptom summaries; not reported in final main/SI |
@@ -23,10 +23,10 @@ This is a source-level map to the revised manuscript, not proof that the availab
 | 14 | `05_forecasting_and_validation/14_rolling_origin_forecast_2016_2025.Rmd` | Final-paper support: rolling model fits/predicted case rankings for 2017–2025; scored by 15. Active fitting is guarded |
 | 15 | `05_forecasting_and_validation/15_rolling_origin_scoring_2017_2025.Rmd` | Final-paper support: Figure 6/Table S3. Case-count ranking, prior-year cases and prior-year ≥65 population-share comparator; not validation of the combined age-weighted score itself |
 | 16 | `01_data_and_population/16_step3_case_definition.Rmd` | Supporting audit: confirmed-case classification versus confirmation criterion; cohort terminology/checks, not a separate main result |
-| 17 | `05_forecasting_and_validation/17_secondary_forecast_2016_2022_to_2024_2025.Rmd` | Final-paper support: Figure S3, through-2022 model scored on 2024–2025. Reads saved prediction/scoring files; no production fitter. The age-comparator formula still needs confirmation |
-| 18 | `05_forecasting_and_validation/18_external_validation_2026.Rmd` | Mixed: Figure S4/Results, partial-2026 temporal evaluation and carried-forward 2025 ranking. Named-pilot/Dourados/state summaries are ancillary; not an evaluation of rollout impact |
-| 19 | `05_forecasting_and_validation/19_reporting_completeness_sensitivity_2025.Rmd` | Final-paper support: Figure S2, changing the incidence-summary months while holding the full fit and severity component fixed; no refit without 2025 |
-| 20 | `04_clinical_and_prioritization/20_burden_averted_per_1000_doses.Rmd` | Mixed: equal-dose section supports Figure S5/Table S4; fixed-municipality-coverage scenarios are separate supporting calculations. No observed vaccine effectiveness or product-specific older-adult benefit is estimated |
+| 17 | `05_forecasting_and_validation/17_secondary_forecast_2016_2022_to_2024_2025.Rmd` | Final-paper support: Figure S4, through-2022 model scored on 2024–2025. Reads saved prediction/scoring files; no production fitter. The age-comparator formula still needs confirmation |
+| 18 | `05_forecasting_and_validation/18_external_validation_2026.Rmd` | Mixed: Figure S5/Results, partial-2026 temporal evaluation and carried-forward 2025 ranking. Named-pilot/Dourados/state summaries are ancillary; not an evaluation of rollout impact |
+| 19 | `05_forecasting_and_validation/19_reporting_completeness_sensitivity_2025.Rmd` | Final-paper support: Figure S3, changing the incidence-summary months while holding the full fit and severity component fixed; no refit without 2025 |
+| 20 | `04_clinical_and_prioritization/20_burden_averted_per_1000_doses.Rmd` | Mixed: equal-dose section supports Figure S6 (verify table numbering); fixed-municipality-coverage scenarios are separate supporting calculations. No observed vaccine effectiveness or product-specific older-adult benefit is estimated |
 | 21 | `01_data_and_population/21_race_ethnicity_denominators_IBGE2022.Rmd` | Ancillary: race/ethnicity denominators and rate summaries; absent from final main/SI |
 
 Paths are relative to `analysis/`.
@@ -47,9 +47,9 @@ Paths are relative to `analysis/`.
 ## Submission output checks
 
 - Resolve production-input and geographic/denominator checks before finalizing figures or estimates.
-- Export the already-coded municipality-averaged residual map if the verified fit is available; the edited supplement does not yet include it.
-- Present the already-reported incidence-by-population comparison alongside the combined score. The current Figure 5 lacks its curve/table.
-- Keep source-plot labels consistent with the edited captions, including the Figure 6 difference in percentage points. Confirm final portable figure exports and table/figure numbering.
+- The current supplement identifies the Pearson residual map as S1; verify the archived exported plot and underlying production fit rather than creating a second S1.
+- Verify the incidence-by-population comparison is represented consistently in the latest Figure 5, its source output and caption.
+- Verify current supplement order: S1 Pearson residual map, S2 prior/posterior, S3 recent-incidence window, S4 longer-horizon, S5 provisional 2026, S6 illustrative vaccine allocation. The S6 legend/image still needs author-side verification against the final caption. Check final source-plot labels, the main Figure 6 percentage-point difference, portable exports and table numbers.
 - Retain the stated uncertainty limits: national CPO/PIT were unavailable, shared-component magnitudes depend on specification/priors, and allocation intervals propagate CFR uncertainty only with ranks/allocations fixed.
 
 These are output/provenance completion tasks, not instructions to add ancillary analyses or refit every model.
