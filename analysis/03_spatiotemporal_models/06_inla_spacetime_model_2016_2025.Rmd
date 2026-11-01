@@ -9,6 +9,7 @@ editor_options:
   chunk_output_type: console
 params:
   run_heavy_models: false
+  results_dir: "results"
 ---
 
 ```{r setup, include=FALSE}

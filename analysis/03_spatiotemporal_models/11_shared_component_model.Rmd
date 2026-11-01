@@ -7,7 +7,7 @@ editor_options:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-source("00_setup.R")
+source("00_paths.R")
 
 # Assumes:
 #   - Chik_total from 01_data_import_cleaning.Rmd
@@ -413,12 +413,7 @@ cat(
 
 # ------------------------------------------------------------
 # 2. Fit only missing or unreadable years
-# Explicit opt-in is mandatory before initiating any INLA fit.
 # ------------------------------------------------------------
-
-if (length(years_missing) > 0L) {
-  require_model_fitting(paste0("shared-component years: ", paste(years_missing, collapse = ", ")))
-}
 
 for (yr in years_missing) {
 

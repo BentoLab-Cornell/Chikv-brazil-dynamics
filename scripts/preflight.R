@@ -74,13 +74,19 @@ inventory <- tryCatch({
 record("inventory", "docs/REQUIRED_ARTIFACTS.csv", !is.null(inventory), inventory_error)
 if (!source_only && !is.null(inventory)) {
   for (i in seq_len(nrow(inventory))) {
-    prep_artifact <- inventory$path[i] %in% c(
-      "Chik_total.rds", "pop_panel_total.rds", "pop_panel_age.rds"
-    )
-    p <- if (prep_artifact) prep_cache_path(inventory$path[i]) else result_path(inventory$path[i])
+    artifact <- inventory$path[i]
+    p <- if (artifact %in% c("Chik_total.rds", "pop_panel_total.rds", "pop_panel_age.rds")) {
+      prep_cache_path(artifact)
+    } else if (grepl("^fit_shared_[0-9]{4}\\.rds$|^shared_component_|^health_region_graph_2025\\.adj$", artifact)) {
+      file.path(shared_component_dir(), artifact)
+    } else if (grepl("^(rolling_origin_residence|secondary_forecast_2016_2022_residence)/", artifact)) {
+      file.path(rolling_run_dir(), "results", artifact)
+    } else {
+      result_path(artifact)
+    }
     info <- file.info(p)
     record("artifact", inventory$path[i], !is.na(info$size) && info$size > 0 && !info$isdir,
-           paste("Checked:", p, "Producer:", inventory$producer[i], "Consumer:", inventory$consumer[i],
+           paste("Producer:", inventory$producer[i], "Consumer:", inventory$consumer[i],
                  inventory$notes[i]), optional = inventory$requirement[i] != "required")
   }
 }

@@ -247,9 +247,4 @@ stopifnot(
   nrow(combined_all) == nrow(Chik_total),
   identical(combined_all, Chik_total)
 )
-
-# Persist the confirmed residence-attributed cohort for downstream modules.
-# Re-running this import intentionally replaces the cache in RESULTS_DIR.
-ensure_results_dir()
-saveRDS(Chik_total, result_path("Chik_total.rds"))
 ```

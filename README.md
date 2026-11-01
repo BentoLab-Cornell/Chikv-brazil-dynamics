@@ -17,7 +17,6 @@ For dependencies and module execution, see the [reproducibility guide](docs/REPR
 - [`analysis/`](analysis/README.md): research modules and execution instructions.
 - [`chikungunya/`](chikungunya/) and [`population/`](population/): surveillance and population inputs.
 - [Data inventory](docs/DATA_INVENTORY.md): source files and expected outputs.
-- [Portability and result reconciliation](docs/PORTABILITY_AND_RECONCILIATION.md): configuration, safe validation and remaining production evidence.
 - [Module-to-result map](docs/MODULE_TO_RESULT.md): manuscript analyses and retained ancillary work.
 
 **Reproducibility status:** production fits, provenance and environment details remain incomplete; end-to-end reproduction has not yet been verified. See the reproducibility guide for outstanding requirements.

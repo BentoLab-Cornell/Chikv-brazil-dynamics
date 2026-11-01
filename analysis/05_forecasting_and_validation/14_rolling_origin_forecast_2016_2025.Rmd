@@ -474,7 +474,6 @@ fit_one_fold <- function(target_year) {
 
   } else {
 
-    require_model_fitting(paste0("rolling-origin fold ", target_year))
     cat("No saved fit found; starting INLA.\n")
     print(Sys.time())
 
@@ -554,15 +553,6 @@ fit_one_fold <- function(target_year) {
 A failed fold does not stop later years. Existing predictions are skipped.
 
 ```{r run-primary, eval=TRUE}
-# Fail before the loop (and before its error handler can swallow a guard error)
-# if any requested prediction has neither a CSV nor a saved fit.
-missing_folds <- TARGET_YEARS[vapply(TARGET_YEARS, function(yy) {
-  !file.exists(file.path(PRED_DIR, sprintf("forecast_annual_predict_%d.csv", yy))) &&
-    !file.exists(file.path(FIT_DIR, sprintf("fit_rolling_predict_%d.rds", yy)))
-}, logical(1))]
-if (length(missing_folds) > 0L) {
-  require_model_fitting(paste0("rolling-origin years: ", paste(missing_folds, collapse = ", ")))
-}
 all_predictions <- list()
 
 for (yy in TARGET_YEARS) {
