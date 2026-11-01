@@ -7,7 +7,7 @@ editor_options:
 
 # Purpose
 
-This file is the complete rolling-origin forecast analysis. It preferentially reads saved analytic objects, but can reuse objects already present in the current R session and can rebuild the 2020 municipality geometry/adjacency graph if needed.
+This notebook runs the rolling-origin forecasts using saved inputs or objects already in the current R session. If needed, it rebuilds the 2020 municipality geometry and adjacency graph.
 
 It reads the saved analytic objects directly from RDS files, then performs nine one-year-ahead folds:
 

@@ -489,7 +489,7 @@ plot_data <- yearly_performance %>%
 ```
 
 ```{r main-figure, fig.width=9.2, fig.height=4.4}
-# Final Figure 6 design used for the manuscript Results.
+# Figure 6
 rule_colors <- c(
   "Rolling-origin forecast" = "#0072B2",
   "Last-year cases" = "#D55E00",
@@ -691,7 +691,7 @@ cat("Rules compared: rolling-origin forecast, age-only, last-year cases\n")
 cat("Matched municipalities selected per rule:", TOP_N, "of", EXPECTED_N_MUNI, "\n")
 ```
 
-# Interpretation guardrails
+# Interpretation
 
 - Each rolling-origin forecast is evaluated only against a year that was not used as an observed response in that fold.
 - The age-only and last-year-case baselines use only information available before the target year.
@@ -1002,7 +1002,7 @@ print(fig6_improved)
 
 
 
-# Interpretation guardrails
+# Interpretation
 
 - Each rolling-origin forecast is evaluated only against a year that was not used as an observed response in that fold.
 - The age-only and last-year-case baselines use only information available before the target year.

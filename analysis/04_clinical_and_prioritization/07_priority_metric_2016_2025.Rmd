@@ -1,5 +1,5 @@
 ---
-title: "07 - Priority Metric, Figure 2, and Supp9 Follow-up (2016-2025 Revision)"
+title: "07 - Priority Metric (2016–2025)"
 output: html_document
 editor_options:
   chunk_output_type: console

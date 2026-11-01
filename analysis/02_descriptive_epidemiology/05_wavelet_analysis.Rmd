@@ -33,8 +33,7 @@ chik <- Chik_total %>%
   )
 ```
 
-> **Revision note (Reviewer 1 / Plan Step 19).** The wavelet analysis is
-> retained only as a supplementary descriptive analysis. A ten-year series,
+> The wavelet analysis is retained as exploratory descriptive work. A ten-year series,
 > including the COVID-era surveillance disruption, is too short to support
 > strong inference about multi-year periodicity, and an annual cycle in an
 > Aedes-borne infection in Brazil is not itself a principal finding. The main

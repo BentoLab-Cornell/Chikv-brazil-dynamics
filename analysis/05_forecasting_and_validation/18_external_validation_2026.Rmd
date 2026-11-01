@@ -1,5 +1,5 @@
 ---
-title: "18 - External Validation Against 2026 Chikungunya Surveillance"
+title: "18 - Partial-2026 Temporal Evaluation"
 output: html_document
 editor_options:
   chunk_output_type: console
@@ -7,8 +7,7 @@ editor_options:
 
 # Purpose
 
-This file performs the planned **2026 external validation** using surveillance data that were
-not included in the 2016-2025 analytic window.
+This notebook compares pre-2026 rankings against partial-2026 surveillance data, which were not included in the 2016–2025 analysis.
 
 Primary aims:
 
@@ -860,7 +859,7 @@ p_external_clean
 ```
 
 
-# Interpretation guardrails
+# Interpretation
 
 - The 2026 data are partial/provisional surveillance data. Always state the actual file
   extraction/download date in the manuscript once confirmed. Do not substitute the latest

@@ -703,7 +703,7 @@ incomplete late-2025 surveillance.
 If rank stability is materially weaker, report the sensitivity directly and use the more
 conservative transmission window in the targeting analysis rather than masking the instability.
 
-# Interpretation guardrails
+# Interpretation
 
 - This sensitivity changes the recent **transmission window only**.
 - The severity-burden component is intentionally fixed to the File 13 definition so that the
