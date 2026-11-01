@@ -29,9 +29,7 @@ stopifnot(
 chik <- Chik_total %>%
   mutate(
     DT_SIN_PRI = as.Date(DT_SIN_PRI),
-    year = lubridate::year(DT_SIN_PRI),
-    code_muni = stringr::str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0"),
-    code_state = substr(code_muni, 1, 2)
+    year = lubridate::year(DT_SIN_PRI)
   )
 ```
 
@@ -196,7 +194,19 @@ short, surveillance-disrupted series.
 chik_region <- chik %>%
   left_join(state_region_lookup, by = "code_state")
 
-stopifnot(sum(is.na(chik_region$region)) == 0)
+# Audit cases without municipality of residence
+n_unmatched_region <- sum(is.na(chik_region$region))
+
+cat("Confirmed cases:", nrow(chik_region), "\n")
+cat("Cases without residence-based region:", n_unmatched_region, "\n")
+
+stopifnot(
+  n_unmatched_region == sum(is.na(chik_region$ID_MN_RESI))
+)
+
+# Exclude missing residence only from regional analyses
+chik_region <- chik_region %>%
+  filter(!is.na(region))
 
 region_weekly_obs <- chik_region %>%
   mutate(
@@ -222,7 +232,7 @@ cat("Completed region-week rows:", nrow(region_weekly), "\n")
 
 stopifnot(
   nrow(region_weekly) == 5L * 10L * 52L,
-  sum(region_weekly$cases) == nrow(chik)
+  sum(region_weekly$cases) == nrow(chik_region)
 )
 
 
@@ -373,6 +383,6 @@ stopifnot(
   n_distinct(chik_region$region) == 5L,
   nrow(region_year_timing) == 5L * 10L,
   all(region_year_timing$year %in% STUDY_START_YEAR:STUDY_END_YEAR),
-  sum(region_year_timing$annual_cases) == nrow(chik)
+  sum(region_year_timing$annual_cases) == nrow(chik_region)
 )
 ```

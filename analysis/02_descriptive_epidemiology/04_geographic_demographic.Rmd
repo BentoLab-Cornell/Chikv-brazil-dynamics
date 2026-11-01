@@ -36,18 +36,14 @@ chik <- Chik_total %>%
   mutate(
     DT_SIN_PRI = as.Date(DT_SIN_PRI),
     year = lubridate::year(DT_SIN_PRI),
-    code_muni = stringr::str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0"),
-    code_state = substr(code_muni, 1, 2),
     is_death = EVOLUCAO == 2,
     is_hosp = as.character(HOSPITALIZ) == "1",
-    # Delay variables are derived locally from the raw SINAN dates so this
-    # file does not depend on objects created inside 03_descriptive_epi.Rmd.
     report_delay = as.numeric(as.Date(DT_NOTIFIC) - DT_SIN_PRI),
-    hosp_delay   = as.numeric(as.Date(DT_INTERNA) - DT_SIN_PRI),
-    death_delay  = as.numeric(as.Date(DT_OBITO) - DT_SIN_PRI),
+    hosp_delay = as.numeric(as.Date(DT_INTERNA) - DT_SIN_PRI),
+    death_delay = as.numeric(as.Date(DT_OBITO) - DT_SIN_PRI),
     report_delay = if_else(!is.na(report_delay) & report_delay >= 0, report_delay, NA_real_),
-    hosp_delay   = if_else(!is.na(hosp_delay) & hosp_delay >= 0, hosp_delay, NA_real_),
-    death_delay  = if_else(!is.na(death_delay) & death_delay >= 0, death_delay, NA_real_)
+    hosp_delay = if_else(!is.na(hosp_delay) & hosp_delay >= 0, hosp_delay, NA_real_),
+    death_delay = if_else(!is.na(death_delay) & death_delay >= 0, death_delay, NA_real_)
   )
 ```
 
@@ -82,6 +78,19 @@ muni_lookup <- muni_sf %>%
 ```{r municipality-incidence-panel}
 chik_muni_year <- chik %>%
   count(year, code_muni, name = "cases")
+
+# Audit residence-based municipality matching
+geo_check_04 <- chik %>%
+  mutate(
+    match_status = dplyr::case_when(
+      is.na(code_muni) ~ "Missing residence",
+      !code_muni %in% muni_sf$code_muni ~ "Outside 2020 municipality universe",
+      TRUE ~ "Included"
+    )
+  ) %>%
+  count(match_status)
+
+print(geo_check_04)
 
 map_panel <- tidyr::crossing(
   year = STUDY_START_YEAR:STUDY_END_YEAR,
@@ -411,9 +420,8 @@ severity surface or allocation metric.
 
 ```{r delay-maps}
 calc_delay_muni <- function(df, delay_col, filter_fun = NULL, min_n = 1L) {
-  d <- df %>%
-    filter(!is.na(.data[[delay_col]]), .data[[delay_col]] >= 0) %>%
-    mutate(code_muni = stringr::str_pad(substr(as.character(ID_MUNICIP), 1, 6), 6, pad = "0"))
+d <- df %>%
+  filter(!is.na(.data[[delay_col]]), .data[[delay_col]] >= 0)
 
   if (!is.null(filter_fun)) d <- filter_fun(d)
 
