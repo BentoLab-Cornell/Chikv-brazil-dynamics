@@ -8,11 +8,30 @@ Run the commands below from the repository root. `analysis/00_paths.R` supplies 
 
 | Setting | Default / meaning |
 |---|---|
-| Source surveillance | `chikungunya/` at the repository root |
-| Source population | `population/` at the repository root |
+| Source surveillance | `chikungunya/` at the repository root, or `CHIKV_CHIK_DATA_DIR` |
+| Source population | `population/` at the repository root, or `CHIKV_POPULATION_DIR` |
 | `RESULTS_DIR` | `<repository>/results` |
-| `CHIKV_RESULTS_DIR` | Optional absolute or repository-relative override for generated artifacts |
-| `CHIKV_ALLOW_MODEL_FITTING` | Fitting guard; active fitting paths in modules 11/14 require explicit `true` |
+| `CHIKV_RESULTS_DIR` | Optional absolute or repository-relative override for generated artifacts and saved model inputs |
+| `CHIKV_PREP_CACHE_DIR` | Optional separate directory containing `Chik_total.rds`, `pop_panel_total.rds`, `pop_panel_age.rds`; defaults to `RESULTS_DIR` |
+| `CHIKV_ROLLING_RUN_DIR` | Optional directory containing the historical `results/rolling_origin_residence/` and `results/secondary_forecast_2016_2022_residence/` trees |
+| `CHIKV_SHARED_COMPONENT_DIR` | Optional directory containing `fit_shared_YEAR.rds` (2016–2025) |
+| `CHIKV_ROLLING_INPUT_DIR` | Optional directory for rolling-origin case and population RDS inputs |
+| `CHIKV_ROLLING_CASE_CACHE` | Optional alternative basename of the rolling-origin case RDS (default `Chik_total_residence_corrected.rds`) |
+| `CHIKV_MUNI_GEOMETRY_PATH` | Optional full path to a saved `muni_sf_2020.rds` geometry file |
+| `CHIKV_ALLOW_MODEL_FITTING` | Defined helper; configuring paths does not prevent the original fitting code in modules 11/14 from running if caches are missing |
+
+To use local files without editing analysis code, set the paths for your own machine before running a selected module:
+
+```sh
+export CHIKV_RESULTS_DIR="/path/to/local/inla_results"
+export CHIKV_PREP_CACHE_DIR="/path/to/local/prepared_rds"
+export CHIKV_ROLLING_RUN_DIR="/path/to/local/archived_hpc_run"
+export CHIKV_SHARED_COMPONENT_DIR="/path/to/local/shared_component_fits"
+# Optional when rolling inputs are in another folder:
+# export CHIKV_ROLLING_INPUT_DIR="/path/to/local/rolling_inputs"
+```
+
+Keep the existing RDS/CSV basenames and subdirectory structure. These variables select where files are stored; they do not supply missing inputs, install R packages, or refit the primary INLA model automatically. If your files are already organized under one results root, the optional variables can retain their defaults.
 
 Keep raw inputs separate from generated outputs. Use an empty output directory for a fresh execution check, or a documented directory containing the matching production caches. A cache's existence alone does not establish compatibility: preserve input hashes, case definition, municipality keys/order, model specification, software versions and the generating commit with each production artifact.
 

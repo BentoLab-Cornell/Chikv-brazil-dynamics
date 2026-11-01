@@ -7,7 +7,7 @@ editor_options:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
+source("00_paths.R")
 
 # Assumes:
 #   - Chik_total from 01_data_import_cleaning.Rmd
@@ -17,9 +17,7 @@ STUDY_START_YEAR <- 2016L
 STUDY_END_YEAR   <- 2025L
 STUDY_YEARS      <- STUDY_START_YEAR:STUDY_END_YEAR
 
-results_dir <- path.expand(
-  "~/Downloads/inla_results/shared_component_residence_20261030"
-)
+results_dir <- shared_component_dir()
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
 stopifnot(

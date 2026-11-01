@@ -15,19 +15,19 @@ source("00_setup.R")
 The primary study period is 2016-2025. The 2026 file is kept separate for held-out temporal validation and is never included in the primary analytic dataset.
 
 ```{r import}
-CHIK16 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR16.dbc"))
-CHIK17 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR17.dbc"))
-CHIK18 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR18.dbc"))
-CHIK19 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR19.dbc"))
-CHIK20 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR20.dbc"))
-CHIK21 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR21.dbc"))
-CHIK22 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR22.dbc"))
-CHIK23 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR23.dbc"))
-CHIK24 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR24.dbc"))
-CHIK25 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR25.dbc"))
+CHIK16 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR16.dbc"))
+CHIK17 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR17.dbc"))
+CHIK18 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR18.dbc"))
+CHIK19 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR19.dbc"))
+CHIK20 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR20.dbc"))
+CHIK21 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR21.dbc"))
+CHIK22 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR22.dbc"))
+CHIK23 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR23.dbc"))
+CHIK24 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR24.dbc"))
+CHIK25 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR25.dbc"))
 
 # Held-out 2026 data; never bind into Chik_total.
-CHIK26 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR26.dbc"))
+CHIK26 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR26.dbc"))
 ```
 
 ## Construct the 2016-2025 analytic dataset

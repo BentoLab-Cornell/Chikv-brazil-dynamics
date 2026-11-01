@@ -33,12 +33,14 @@ The runner sets the analysis working directory, executes the requested IDs in or
 CHIKV_RESULTS_DIR=/absolute/path/chikv-results Rscript scripts/preflight.R
 ```
 
+For local paths, set `CHIKV_RESULTS_DIR`; optional separate roots are `CHIKV_PREP_CACHE_DIR`, `CHIKV_ROLLING_RUN_DIR`, and `CHIKV_SHARED_COMPONENT_DIR`. See the [configuration guide](../docs/REPRODUCIBILITY.md).
+
 Several notebooks depend on objects prepared earlier in the same process or on saved model-derived outputs. Independent commands create independent R sessions; choose a prerequisite sequence or supply the expected caches. Plain RStudio Knit may use a nested notebook folder as its working directory; use the runner for the documented execution route.
 
 ## Fitting and scope limits
 
 - Module 06 reads saved primary/sensitivity fits; its original primary fitting call remains commented out. The verified production fitting route still needs to be supplied.
-- Modules 11 and 14 contain active fitting paths. Missing-cache model fitting is guarded and requires explicit `CHIKV_ALLOW_MODEL_FITTING=true`. Enabling it can launch expensive models; it is not part of the packaging checks or a substitute for production provenance.
+- Modules 11 and 14 contain active fitting paths. Run them only when intending to fit any missing models; path configuration does not disable model fitting.
 - Module 17 reads existing longer-horizon predictions/scoring outputs; it does not contain the production fitter.
 - Modules 13, 18 and 20 contain additional sections beyond the final paper. Running a whole notebook may generate ancillary outputs. Module 20's equal-dose section supports Figure S5/Table S4; its fixed-municipality-coverage scenario is a different comparison.
 - File 19 changes the recent-incidence summary window with the full fitted model held fixed. It does not refit after removing 2025 and does not establish reporting completeness.

@@ -20,6 +20,7 @@ Existing prediction CSVs are detected and skipped automatically. If a fit RDS ex
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+source("00_paths.R")
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -38,9 +39,7 @@ TARGET_YEARS <- 2017:2025
 EXPECTED_N_MUNI <- 5570L
 
 # Main output location used throughout the revision.
-RESULT_ROOT <- path.expand(
-  "~/Downloads/inla_results/hpc_residence_20261028"
-)
+RESULT_ROOT <- rolling_run_dir()
 
 ROLL_DIR <- file.path(
   RESULT_ROOT,
@@ -56,10 +55,11 @@ dir.create(PRED_DIR, recursive = TRUE, showWarnings = FALSE)
 # Saved-input search locations.
 # The helper checks the project working directory first, then the revision
 # results folder. Add another directory here if you keep the RDS files elsewhere.
-INPUT_DIRS <- c(
+INPUT_DIRS <- unique(c(
   RESULT_ROOT,
-  file.path(RESULT_ROOT, "results")
-)
+  file.path(RESULT_ROOT, "results"),
+  configured_path("CHIKV_ROLLING_INPUT_DIR", PREP_CACHE_DIR)
+))
 
 find_input <- function(filename) {
   candidates <- file.path(INPUT_DIRS, filename)
@@ -118,10 +118,10 @@ load_or_session <- function(filename, object_name) {
   )
 }
 
-Chik_total <- load_or_session(
-  "Chik_total_residence_corrected.rds",
-  "Chik_total"
+ROLLING_CASE_CACHE <- Sys.getenv(
+  "CHIKV_ROLLING_CASE_CACHE", unset = "Chik_total_residence_corrected.rds"
 )
+Chik_total <- load_or_session(ROLLING_CASE_CACHE, "Chik_total")
 pop_panel_total <- load_or_session("pop_panel_total.rds", "pop_panel_total")
 
 muni_candidates <- file.path(INPUT_DIRS, "muni_sf_2020.rds")

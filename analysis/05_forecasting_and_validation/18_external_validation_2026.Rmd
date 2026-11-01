@@ -31,7 +31,7 @@ source("00_setup.R")
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-RESULT_ROOT <- path.expand("~/Downloads/inla_results")
+RESULT_ROOT <- RESULTS_DIR
 OUT_DIR <- file.path(RESULT_ROOT, "external_validation_2026")
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -44,7 +44,7 @@ PRIORITY_PATH <- file.path(
 # Existing one-year-ahead 2025 rolling-origin prediction produced by File 14.
 # This is a through-2024 forecast for 2025; it is NOT a through-2025 forecast for 2026.
 ROLLING_2025_PATH <- file.path(
-  path.expand("~/Downloads/inla_results/hpc_residence_20261028"),
+  rolling_run_dir(),
   "results",
   "rolling_origin_residence",
   "predictions",
@@ -53,8 +53,7 @@ ROLLING_2025_PATH <- file.path(
 
 # Raw 2026 DBC used only for external validation.
 CHIK26_PATH <- file.path(
-  RAW_DBC_DIR,
-  "CHIKdata",
+  CHIK_DATA_DIR,
   "CHIKBR26.dbc"
 )
 
@@ -113,7 +112,7 @@ if (!exists("Chik_2026")) {
   if (!file.exists(CHIK26_PATH)) {
     stop(
       "CHIKBR26.dbc not found at:\n", CHIK26_PATH,
-      "\nCheck RAW_DBC_DIR in 00_setup.R."
+      "\nCheck CHIK_DATA_DIR in 00_paths.R."
     )
   }
 
@@ -139,9 +138,9 @@ cat(
 
 ```{r municipality-lookup}
 MUNI_PATH_CANDIDATES <- c(
+  configured_path("CHIKV_MUNI_GEOMETRY_PATH", result_path("muni_sf_2020.rds")),
   file.path(getwd(), "muni_sf_2020.rds"),
-  file.path(RESULT_ROOT, "muni_sf_2020.rds"),
-  path.expand("~/muni_sf_2020.rds")
+  file.path(RESULT_ROOT, "muni_sf_2020.rds")
 )
 
 muni_hit <- MUNI_PATH_CANDIDATES[file.exists(MUNI_PATH_CANDIDATES)]

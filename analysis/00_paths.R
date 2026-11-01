@@ -17,8 +17,6 @@ find_project_root <- function(start = getwd()) {
 }
 
 PROJECT_ROOT <- find_project_root()
-CHIK_DATA_DIR <- file.path(PROJECT_ROOT, "chikungunya")
-IBGE_DOWNLOADS_DIR <- file.path(PROJECT_ROOT, "population")
 RAW_DBC_DIR <- PROJECT_ROOT
 
 .results_setting <- path.expand(Sys.getenv("CHIKV_RESULTS_DIR", unset = "results"))
@@ -29,6 +27,31 @@ RESULTS_DIR <- normalizePath(.results_setting, winslash = "/", mustWork = FALSE)
 rm(.results_setting)
 
 result_path <- function(...) file.path(RESULTS_DIR, ...)
+
+# Optional production-run roots. Relative overrides are resolved from the repository.
+# Preserving named HPC directories keeps archived fits separate from new analyses.
+configured_path <- function(env_var, default_path) {
+  selected <- Sys.getenv(env_var, unset = "")
+  path <- path.expand(if (nzchar(selected)) selected else default_path)
+  if (!grepl("^(/|[A-Za-z]:[/\\\\])", path)) {
+    path <- file.path(PROJECT_ROOT, path)
+  }
+  normalizePath(path, winslash = "/", mustWork = FALSE)
+}
+CHIK_DATA_DIR <- configured_path("CHIKV_CHIK_DATA_DIR", file.path(PROJECT_ROOT, "chikungunya"))
+IBGE_DOWNLOADS_DIR <- configured_path("CHIKV_POPULATION_DIR", file.path(PROJECT_ROOT, "population"))
+PREP_CACHE_DIR <- configured_path("CHIKV_PREP_CACHE_DIR", RESULTS_DIR)
+# Preparation caches may be archived with an HPC run. Read only from the
+# explicitly configured source; writing regenerated caches still uses result_path().
+prep_cache_path <- function(filename) file.path(PREP_CACHE_DIR, filename)
+
+rolling_run_dir <- function() {
+  configured_path("CHIKV_ROLLING_RUN_DIR", result_path("hpc_residence_20261028"))
+}
+shared_component_dir <- function() {
+  configured_path("CHIKV_SHARED_COMPONENT_DIR",
+                  result_path("shared_component_residence_20261030"))
+}
 ensure_results_dir <- function() {
   if (!dir.exists(RESULTS_DIR) &&
       !dir.create(RESULTS_DIR, recursive = TRUE, showWarnings = FALSE)) {

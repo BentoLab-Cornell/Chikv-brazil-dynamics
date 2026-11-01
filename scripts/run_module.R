@@ -41,7 +41,7 @@ run_selected <- function(module_ids, module_files) {
 
   # Explicitly named caches only; no arbitrary workspace is restored.
   for (object_name in c("Chik_total", "pop_panel_total", "pop_panel_age")) {
-    cache_file <- result_path(paste0(object_name, ".rds"))
+    cache_file <- prep_cache_path(paste0(object_name, ".rds"))
     if (file.exists(cache_file)) assign(object_name, readRDS(cache_file), envir = .GlobalEnv)
   }
   if (exists("Chik_total", envir = .GlobalEnv, inherits = FALSE)) {

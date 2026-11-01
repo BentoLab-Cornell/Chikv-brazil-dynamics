@@ -30,8 +30,10 @@ TARGET_YEARS <- 2017:2025
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-results_dir <- path.expand(
-  "~/Downloads/inla_results/hpc_residence_20261028"
+results_dir <- rolling_run_dir()
+rolling_input_dir <- configured_path("CHIKV_ROLLING_INPUT_DIR", results_dir)
+rolling_case_cache <- Sys.getenv(
+  "CHIKV_ROLLING_CASE_CACHE", unset = "Chik_total_residence_corrected.rds"
 )
 
 pred_dir <- file.path(
@@ -54,11 +56,11 @@ cat("Matched top-third municipality count:", TOP_N, "\n")
 
 ```{r load-inputs}
 pop_panel_age <- readRDS(
-  file.path(results_dir, "pop_panel_age.rds")
+  file.path(rolling_input_dir, "pop_panel_age.rds")
 )
 
 Chik_total <- readRDS(
-  file.path(results_dir, "Chik_total_residence_corrected.rds")
+  file.path(rolling_input_dir, rolling_case_cache)
 )
 
 stopifnot(
