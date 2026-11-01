@@ -8,8 +8,6 @@ editor_options:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-source("00_setup.R")
-
 
 # Assumes:
 #   - Chik_total from 01_data_import_cleaning.Rmd
@@ -19,7 +17,9 @@ STUDY_START_YEAR <- 2016L
 STUDY_END_YEAR   <- 2025L
 STUDY_YEARS      <- STUDY_START_YEAR:STUDY_END_YEAR
 
-results_dir <- RESULTS_DIR
+results_dir <- path.expand(
+  "~/Downloads/inla_results/shared_component_residence_20261030"
+)
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
 stopifnot(
@@ -87,7 +87,7 @@ chik_hr_base <- Chik_total %>%
   mutate(
     year      = as.integer(format(as.Date(DT_SIN_PRI), "%Y")),
     code_muni = str_pad(
-      substr(as.character(ID_MUNICIP), 1, 6),
+      substr(as.character(ID_MN_RESI), 1, 6),
       6,
       pad = "0"
     ),
@@ -306,7 +306,6 @@ fit_shared_component_year <- function(
       )
     )
 
-  require_model_fitting("Module 11 shared-component model")
   fit <- inla(
     formula_shared,
     family = "poisson",

@@ -34,17 +34,16 @@ library(sf)
 library(spdep)
 library(INLA)
 
-results_dir <- RESULTS_DIR
+results_dir <- path.expand("~/Downloads/inla_results")
 dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
 
 # This revised file assumes:
 #   Chik_total       -- cleaned SINAN chikungunya notifications
 #   pop_panel_total  -- municipality-year population panel
 #
-# The heavy INLA models were intended to run on Seneca HPC. This notebook
-# loads saved model objects; its fitting calls remain commented out.
-# params$run_heavy_models does not enable them. The executable production
-# fitter and identity of the archived production fits still require verification.
+# The heavy INLA models are intended to run on Seneca HPC. By default,
+# params$run_heavy_models = FALSE, so knitting this document loads saved
+# model objects instead of refitting them.
 ```
 
 # Revision summary
@@ -85,8 +84,8 @@ For reproducibility, use the same 2020 municipality ordering that was used to
 construct the stored adjacency graph.
 
 ```{r shapefile-adjacency}
-if (file.exists(result_path("muni_sf_2020.rds"))) {
-  muni_sf <- readRDS(result_path("muni_sf_2020.rds"))
+if (file.exists("muni_sf_2020.rds")) {
+  muni_sf <- readRDS("muni_sf_2020.rds")
 } else {
   muni_sf <- read_municipality(year = 2020) %>%
     st_make_valid()
@@ -104,11 +103,11 @@ stopifnot(length(space_levels) == nrow(muni_sf))
 stopifnot(length(space_levels) == 5570L)
 stopifnot(!anyDuplicated(space_levels))
 
-if (file.exists(result_path("brazil_muni_2020.adj"))) {
-  g <- INLA::inla.read.graph(result_path("brazil_muni_2020.adj"))
+if (file.exists("brazil_muni_2020.adj")) {
+  g <- INLA::inla.read.graph("brazil_muni_2020.adj")
 } else {
   nb <- poly2nb(muni_sf, queen = TRUE)
-  adj_file <- result_path("brazil_muni_2020.adj")
+  adj_file <- "brazil_muni_2020.adj"
   nb2INLA(file = adj_file, nb = nb)
   g <- INLA::inla.read.graph(adj_file)
 }
@@ -156,7 +155,7 @@ make_panel_muni_month_pop <- function(
 
   observed_cases <- dat %>%
     transmute(
-      code_muni = substr(as.character(ID_MUNICIP), 1, 6),
+      code_muni = substr(as.character(ID_MN_RESI), 1, 6),
       code_muni = str_pad(code_muni, width = 6, pad = "0"),
       ym_date    = floor_date(as.Date(DT_SIN_PRI), unit = "month"),
       is_conf    = CLASSI_FIN %in% c(1, 13)
@@ -232,7 +231,7 @@ Expected production values are:
 - 5,570 municipalities
 - 120 months
 - maximum `st_id = 668400`
-- 1,215,074 confirmed chikungunya cases
+- 1,215,040 confirmed chikungunya cases
 
 # 3. Primary INLA model
 
@@ -323,13 +322,13 @@ formula_chik <- cases ~
 # ============================================================
 # LOCAL RECOVERY MODE
 # Heavy INLA fits are intentionally disabled in this file.
-# Existing HPC results are loaded from the centrally configured RESULTS_DIR.
+# Existing HPC results are loaded from ~/Downloads/inla_results.
 # ============================================================
 cat("\n=== LOCAL RECOVERY MODE ===\n")
 cat("Results directory:", results_dir, "\n")
 cat("Heavy INLA fitting chunks are commented out.\n\n")
 
-primary_path <- file.path(results_dir, "fit_chik_nb_2016_2025.rds")
+primary_path <- file.path(results_dir, "residence", "fit_chik_nb_2016_2025_residence.rds")
 
 if (file.exists(primary_path)) {
   fit_chik_nb_2016_2025 <- readRDS(primary_path)
@@ -341,11 +340,11 @@ fit_chik_nb <- fit_chik_nb_2016_2025
 
 # Paths to all saved HPC model fits used by sensitivity sections.
 saved_fit_paths <- list(
-  primary = file.path(results_dir, "fit_chik_nb_2016_2025.rds"),
-  poisson = file.path(results_dir, "fit_chik_poisson_2016_2025.rds"),
-  excl2020_2021 = file.path(results_dir, "fit_chik_nb_excl2020_2021.rds"),
-  cw_type1 = file.path(results_dir, "fit_cw_type1_2016_2025.rds"),
-  cw_type4 = file.path(results_dir, "fit_cw_type4_2016_2025.rds")
+  primary = primary_path,
+  poisson = file.path(results_dir, "fit_chik_poisson_2016_2025_residence.rds"),
+  excl2020_2021 = file.path(results_dir, "fit_chik_nb_excl2020_2021_residence.rds"),
+  cw_type1 = file.path(results_dir, "fit_cw_type1_2016_2025_residence.rds"),
+  cw_type4 = file.path(results_dir, "fit_cw_type4_2016_2025_residence.rds")
 )
 
 missing_saved_fits <- names(saved_fit_paths)[
@@ -356,7 +355,7 @@ if (length(missing_saved_fits) > 0) {
   stop(
     "Missing saved HPC fit(s): ",
     paste(missing_saved_fits, collapse = ", "),
-    paste0("\nCheck ", RESULTS_DIR, " before continuing.")
+    "\nCheck ~/Downloads/inla_results before continuing."
   )
 }
 
@@ -388,19 +387,17 @@ cat("\nDIC:", fit_chik_nb$dic$dic, "\n")
 cat("WAIC:", fit_chik_nb$waic$waic, "\n")
 ```
 
-The completed Seneca production fit gave:
+The completed residence-based production fit gave:
 
-- `log(POP)` = 1.242 (95% CrI 1.198 to 1.287)
-- negative-binomial size = 0.169
-- BYM2 `phi` = 0.788
-- temporal precision = 3.823
-- Type I interaction precision = 0.564
-- DIC = 476,168.7
-- WAIC = 473,989.6
+- `log(POP)` = 1.161 (95% CrI 1.123 to 1.199)
+- negative-binomial size = 0.193
+- BYM2 `phi` = 0.840
+- temporal precision = 4.094
+- Type I interaction precision = 0.588
+- DIC = 510,086.7
+- WAIC = 507,143.2
 
-The estimated population coefficient is therefore not treated as an offset.
-The small negative-binomial size parameter indicates substantial
-overdispersion.
+The population coefficient was estimated rather than fixed at one through an offset. Its posterior 95% credible interval excluded one, indicating a superlinear association between municipality population size and expected reported case counts, conditional on the other model components. The small negative-binomial size parameter indicates substantial overdispersion.
 
 # 4. Extract fitted incidence rates
 
@@ -891,7 +888,7 @@ otherwise unchanged.
 #   fit_chik_poisson,
 #   file.path(
 #     results_dir,
-#     "fit_chik_poisson_2016_2025.rds"
+#     "fit_chik_poisson_2016_2025_residence.rds"
 #   )
 # )
 ```
@@ -899,7 +896,7 @@ otherwise unchanged.
 ```{r poisson-comparison}
 poisson_path <- file.path(
   results_dir,
-  "fit_chik_poisson_2016_2025.rds"
+  "fit_chik_poisson_2016_2025_residence.rds"
 )
 
 if (file.exists(poisson_path)) {
@@ -939,31 +936,13 @@ if (file.exists(poisson_path)) {
 }
 ```
 
-The completed Poisson sensitivity gave:
+The residence-based Poisson sensitivity analysis produced spatial and temporal estimates broadly consistent with the primary negative-binomial model. The municipality-level spatial random effects were highly correlated between models (Pearson r = 0.997), while the BYM2 spatial mixing parameter remained similar (0.850 under Poisson versus 0.840 under negative binomial). The temporal precision estimates were also comparable (4.189 versus 4.094).
 
-- `log(POP)` = 1.113 (95% CrI 1.070 to 1.156)
-- BYM2 `phi` = 0.793
-- temporal precision = 3.890
-- Type I precision = 0.145
-- DIC = 799,060.7
-- WAIC = 1,864,397
-
-The spatial mixing parameter and temporal precision were very similar to the
-negative-binomial fit. In contrast, the Poisson model required much larger
-municipality-month interaction variance (lower interaction precision), which
-is consistent with the IID interaction absorbing extra-Poisson variability.
-Information criteria were also substantially poorer under Poisson.
-
-Because the model contains a municipality-month latent interaction, WAIC is
-interpreted cautiously and is not used as the sole basis for likelihood choice.
-The strong overdispersion estimate in the negative-binomial model and the
-increase in interaction variance under Poisson are considered jointly.
+However, the Poisson model exhibited substantially lower Type I interaction precision (0.162 versus 0.588), indicating greater residual municipality-month heterogeneity. Model fit was considerably poorer under Poisson (DIC = 778,833.1; WAIC = 1,524,634.5) than under the negative-binomial specification (DIC = 510,086.7; WAIC = 507,143.2). The estimated population coefficient was smaller under Poisson (1.048, 95% CrI 1.011–1.084) than under negative binomial (1.161, 95% CrI 1.123–1.199).
 
 # 11. Sensitivity analysis 2: excluding 2020-2021
 
-The pandemic sensitivity removes observations from 2020-2021 while retaining
-the original monthly RW2 index. The temporal process therefore preserves the
-actual calendar gap.
+The sensitivity analysis excluded observations from 2020 and 2021, retaining 96 months of data. The RW2 temporal component retained the original calendar-time index (1–120), with the excluded 2020–2021 observations omitted rather than reindexed into a consecutive 96-month sequence.
 
 The IID interaction has no temporal adjacency, so its index is compacted over
 the retained municipality-month observations only.
@@ -1052,7 +1031,7 @@ the retained municipality-month observations only.
 #   fit_chik_nb_excl2021,
 #   file.path(
 #     results_dir,
-#     "fit_chik_nb_excl2020_2021.rds"
+#     "fit_chik_nb_excl2020_2021_residence.rds"
 #   )
 # )
 ```
@@ -1060,7 +1039,7 @@ the retained municipality-month observations only.
 ```{r compare-exclude-pandemic}
 excl_path <- file.path(
   results_dir,
-  "fit_chik_nb_excl2020_2021.rds"
+  "fit_chik_nb_excl2020_2021_residence.rds"
 )
 
 if (file.exists(excl_path)) {
@@ -1238,7 +1217,7 @@ stopifnot(
 #   fit_cw_type1,
 #   file.path(
 #     results_dir,
-#     "fit_cw_type1_2016_2025.rds"
+#     "fit_cw_type1_2016_2025_residence.rds"
 #   )
 # )
 ```
@@ -1305,7 +1284,7 @@ stopifnot(
 #   fit_cw_type4,
 #   file.path(
 #     results_dir,
-#     "fit_cw_type4_2016_2025.rds"
+#     "fit_cw_type4_2016_2025_residence.rds"
 #   )
 # )
 ```
@@ -1313,12 +1292,12 @@ stopifnot(
 ```{r compare-centerwest-type1-type4}
 cw_type1_path <- file.path(
   results_dir,
-  "fit_cw_type1_2016_2025.rds"
+  "fit_cw_type1_2016_2025_residence.rds"
 )
 
 cw_type4_path <- file.path(
   results_dir,
-  "fit_cw_type4_2016_2025.rds"
+  "fit_cw_type4_2016_2025_residence.rds"
 )
 
 if (
@@ -1464,6 +1443,148 @@ print(
     )
   ]
 )
+
+monthly_moran_resid <- panel_with_resid %>%
+  group_by(time) %>%
+  group_split() %>%
+  lapply(function(d) {
+
+    d <- d %>% arrange(space)
+
+    mt <- spdep::moran.test(
+      d$resid_pearson,
+      lw,
+      zero.policy = TRUE
+    )
+
+    data.frame(
+      time = unique(d$time),
+      ym_date = min(d$ym_date),
+      moran_I = unname(
+        mt$estimate["Moran I statistic"]
+      ),
+      p_value = mt$p.value
+    )
+  }) %>%
+  dplyr::bind_rows()
+
+summary(monthly_moran_resid$moran_I)
+
+mean(monthly_moran_resid$p_value < 0.05, na.rm = TRUE)
+
+
+# ============================================================
+# Annual Pearson residual maps, 2016–2025
+# Residence-based primary NB model
+# ============================================================
+
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(spdep)
+
+annual_resid <- panel_with_resid %>%
+  mutate(year = lubridate::year(ym_date)) %>%
+  group_by(code_muni, space, year) %>%
+  summarise(
+    mean_resid = mean(resid_pearson, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+stopifnot(
+  nrow(annual_resid) == 5570L * 10L,
+  !anyNA(annual_resid$mean_resid)
+)
+
+resid_map_data_annual <- muni_sf %>%
+  select(code_muni, geometry) %>%
+  left_join(
+    annual_resid %>% select(code_muni, year, mean_resid),
+    by = "code_muni"
+  )
+
+# One common symmetric color scale across all ten years
+resid_limit <- max(
+  abs(quantile(
+    annual_resid$mean_resid,
+    probs = c(0.01, 0.99),
+    na.rm = TRUE
+  ))
+)
+
+p_annual_resid <- ggplot(resid_map_data_annual) +
+  geom_sf(aes(fill = mean_resid), color = NA) +
+  geom_sf(
+    data = states_sf,
+    fill = NA,
+    color = "grey40",
+    linewidth = 0.12
+  ) +
+  facet_wrap(~year, ncol = 5) +
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#B2182B",
+    midpoint = 0,
+    limits = c(-resid_limit, resid_limit),
+    oob = scales::squish,
+    name = "Mean Pearson\nresidual"
+  ) +
+  coord_sf(datum = NA) +
+  labs(
+    title = "Annual spatial patterns of Pearson residuals",
+    subtitle = "Residence-based negative-binomial model, 2016–2025"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    strip.text = element_text(face = "bold", size = 11),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold")
+  )
+
+print(p_annual_resid)
+
+
+
+
+# ============================================================
+# Annual Moran's I of mean Pearson residuals
+# ============================================================
+
+annual_moran <- lapply(2016:2025, function(yy) {
+
+  d <- annual_resid %>%
+    filter(year == yy) %>%
+    arrange(space)
+
+  stopifnot(
+    nrow(d) == length(lw$neighbours),
+    identical(d$code_muni, as.character(space_levels))
+  )
+
+  mt <- spdep::moran.test(
+    d$mean_resid,
+    lw,
+    zero.policy = TRUE
+  )
+
+  data.frame(
+    year = yy,
+    moran_I = unname(mt$estimate["Moran I statistic"]),
+    expected_I = unname(mt$estimate["Expectation"]),
+    z_statistic = unname(mt$statistic),
+    p_value = mt$p.value
+  )
+}) %>%
+  bind_rows() %>%
+  mutate(
+    p_BH = p.adjust(p_value, method = "BH")
+  )
+
+print(annual_moran, digits = 5)
+
+
+
 ```
 
 ## 13.3 CPO/PIT
@@ -1535,7 +1656,7 @@ ne_cases_by_year <- Chik_total %>%
       ),
     code_state =
       substr(
-        as.character(ID_MUNICIP),
+        as.character(ID_MN_RESI),
         1, 2
       ),
     is_conf =
@@ -1580,7 +1701,7 @@ cw_cases_by_year <- Chik_total %>%
       ),
     code_state =
       substr(
-        as.character(ID_MUNICIP),
+        as.character(ID_MN_RESI),
         1, 2
       ),
     is_conf =
@@ -1727,15 +1848,17 @@ cat("\n=== HYPERPARAMETERS ===\n")
 print(hyper_tab)
 ```
 
-For the revised 2016-2025 primary fit, the principal estimates are:
+For the residence-based 2016–2025 primary model,
+the posterior estimates were:
 
-- intercept: -16.030 (95% CrI -16.465 to -15.596);
-- `log(POP)`: 1.242 (95% CrI 1.198 to 1.287);
-- negative-binomial size: 0.169;
-- spatial precision: 0.235;
-- BYM2 mixing parameter `phi`: 0.788;
-- temporal precision: 3.823;
-- Type I interaction precision: 0.564.
+- Intercept: −14.993 (95% CrI −15.361 to −14.626).
+- log(POP): 1.161 (95% CrI 1.123 to 1.199).
+- Negative-binomial size: 0.193 (95% CrI 0.189 to 0.198).
+- Spatial precision: 0.302 (95% CrI 0.278 to 0.327).
+- BYM2 mixing parameter phi: 0.840 (95% CrI 0.800 to 0.877).
+- Temporal precision: 4.094 (95% CrI 3.278 to 5.234).
+- Type I interaction precision: 0.588
+  (95% CrI 0.568 to 0.606).
 
 ## 16.2 Prior versus posterior: random-effect standard deviations
 
@@ -1887,11 +2010,7 @@ fig_prior_post <- p1 + p2 + p3 +
 fig_prior_post
 ```
 
-The posterior mean SDs are approximately:
-
-- spatial heterogeneity: 2.07;
-- temporal RW2 effect: 0.52;
-- Type I space-time interaction: 1.33.
+The posterior mean standard deviations were 1.821 for the spatial BYM2 component, 0.497 for the temporal RW2 component, and 1.304 for the Type I space–time interaction component.
 
 The BYM2 `phi` posterior is reported in the parameter table rather than in this
 three-panel SD figure because `phi` is a mixing parameter, not a standard
@@ -1977,10 +2096,14 @@ cat(
 )
 ```
 
-In the revised production model the observed total was 1,215,074 cases and the
-sum of fitted posterior means was approximately 1.08 million. This diagnostic
-is retained explicitly because the municipality-month interaction can produce
-good local fit while aggregate calibration still deserves inspection.
+The residence-based primary model included 1,215,040
+observed confirmed cases. The sum of fitted posterior
+means was approximately 959,443 cases, corresponding
+to an observed-to-fitted ratio of 1.266.
+
+This discrepancy indicates imperfect aggregate calibration
+despite the inclusion of municipality-month random effects,
+and is retained as a model diagnostic.
 
 ## 16.5 Area-averaged residual map
 
@@ -2168,7 +2291,7 @@ does not by itself determine which interaction structure should be retained.
 ```{r reviewer-nb-poisson-table}
 poisson_path <- file.path(
   results_dir,
-  "fit_chik_poisson_2016_2025.rds"
+  "fit_chik_poisson_2016_2025_residence.rds"
 )
 
 if (file.exists(poisson_path)) {
@@ -2233,13 +2356,13 @@ if (file.exists(poisson_path)) {
 
 Completed Poisson sensitivity values:
 
-- `log(POP)` = 1.113 (95% CrI 1.070 to 1.156);
-- spatial precision = 0.255;
-- BYM2 `phi` = 0.793;
-- temporal precision = 3.890;
-- Type I interaction precision = 0.145;
-- DIC = 799,060.7;
-- WAIC = 1,864,397.
+- `log(POP)` = 1.048 (95% CrI 1.011 to 1.084);
+- spatial precision = 0.333;
+- BYM2 `phi` = 0.850;
+- temporal precision = 4.189;
+- Type I interaction precision = 0.162;
+- DIC = 778,833.1;
+- WAIC = 1,524,634.5.
 
 The spatial mixing parameter and temporal precision were highly stable. The
 Poisson model required much larger Type I interaction variance, consistent with
@@ -2256,14 +2379,15 @@ together.
 
 The BYM2 `phi` parameter is reported separately because it controls the share
 of spatial variance attributed to the structured component. In the primary fit
-the posterior mean `phi` is approximately 0.79.
+the posterior mean phi is approximately 0.84
 
 ## 16.10 CPO/PIT attempt and limitation
 
-CPO and PIT were requested as cross-validatory diagnostics. During development,
-large-model CPO collection was attempted separately from the primary production
-fit. The INLA backend was able to estimate the model but failed during result
-collection for the CPO/PIT output.
+CPO and PIT were considered as additional cross-validatory
+diagnostics during model development. They were not included
+in the final production fit because the computationally
+intensive result-collection step was unsuccessful in
+earlier attempts.
 
 For the revised production workflow:
 
@@ -2315,7 +2439,7 @@ primary model.
 ```{r reviewer-exclusion-comparison}
 excl_path <- file.path(
   results_dir,
-  "fit_chik_nb_excl2020_2021.rds"
+  "fit_chik_nb_excl2020_2021_residence.rds"
 )
 
 if (file.exists(excl_path)) {
@@ -2498,8 +2622,9 @@ if (file.exists(excl_path)) {
           region =
             as.character(region)
         ),
-      by = c("region", "year")
-    ) %>%
+         by = c("region", "year")
+  ) %>%
+  group_by(year) %>%
     mutate(
       rank_primary =
         min_rank(
@@ -2742,12 +2867,12 @@ If both final saved Center-West fits are available, compare them here:
 ```{r reviewer-type1-type4-results}
 type1_path <- file.path(
   results_dir,
-  "fit_cw_type1_2016_2025.rds"
+  "fit_cw_type1_2016_2025_residence.rds"
 )
 
 type4_path <- file.path(
   results_dir,
-  "fit_cw_type4_2016_2025.rds"
+  "fit_cw_type4_2016_2025_residence.rds"
 )
 
 if (
@@ -2854,15 +2979,11 @@ Therefore:
 
 This decision is part of the final analysis, not a computational shortcut.
 
-## 17.4 Population handling
+### 17.4 Population handling
 
-The original offset formulation imposed a population coefficient of exactly 1.
-The reviewer correctly identified this as a substantive assumption.
+The original offset formulation imposed a population coefficient of exactly 1. Following reviewer feedback, the final model instead included log-transformed annual municipality population as an estimated covariate.
 
-The final model estimates the coefficient of `log(POP)` freely and uses annual
-municipality population estimates. The resulting coefficient of 1.242 (95% CrI
-1.198-1.287) is inconsistent with proportional scaling, so the revised model
-does not use a population offset.
+The posterior mean coefficient was 1.161 (95% CrI 1.123–1.199), indicating superlinear scaling of expected reported case counts with population size, conditional on the model's spatial, temporal, and interaction effects. The revised primary model therefore does not impose a fixed population offset.
 
 ## 17.5 Sensitivity analyses retained in the INLA workflow
 
@@ -2882,26 +3003,74 @@ or sensitivity checks of the same Bayesian spatiotemporal model.
 
 ```{r}
 
-# Figure 3A: BYM2 persistent spatial effect
+# ============================================================
+# FIGURE 3 + TABLE 1
+# Residence-based primary INLA model, Brazil 2016–2025
+#
+# Figure 3A: Persistent BYM2 spatial effect
+# Figure 3B: National RW2 temporal effect
+# Figure 3C: Change in modeled relative incidence
+#
+# Table 1: Posterior parameter summaries
+#
+# No INLA model refitting required.
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+library(lubridate)
+library(tibble)
+
+# ------------------------------------------------------------
+# 0. Required objects
+# ------------------------------------------------------------
+
+stopifnot(
+  exists("fit_chik_nb"),
+  exists("muni_sf"),
+  exists("muni_spatial"),
+  exists("temporal_effect"),
+  exists("st_rate_chik_region"),
+  exists("state_region_lookup")
+)
+
+# State boundaries
+states_sf_plot <- geobr::read_state(
+  year = 2020,
+  showProgress = FALSE
+)
+
+# Common diverging palette:
+# negative = blue, zero = near white, positive = red
+col_negative <- "#2166AC"
+col_mid      <- "#F7F7F7"
+col_positive <- "#B2182B"
+
+
+# ============================================================
+# 1. FIGURE 3A
+# Persistent BYM2 spatial effect
+# ============================================================
+
 panel_3A <- ggplot(muni_spatial) +
   geom_sf(
     aes(fill = spatial_mean),
     color = NA
   ) +
   geom_sf(
-    data = geobr::read_state(
-      year = 2020,
-      showProgress = FALSE
-    ),
+    data = states_sf_plot,
     fill = NA,
     color = "grey55",
     linewidth = 0.18,
     inherit.aes = FALSE
   ) +
   scale_fill_gradient2(
-    low = "#B2182B",
-    mid = "#F7F7F7",
-    high = "#2166AC",
+    low = col_negative,
+    mid = col_mid,
+    high = col_positive,
     midpoint = 0,
     name = "Spatial effect"
   ) +
@@ -2914,12 +3083,17 @@ panel_3A <- ggplot(muni_spatial) +
       face = "bold",
       size = 12
     ),
-    legend.position = "right"
+    legend.position = "right",
+    plot.margin = margin(5, 5, 5, 5)
   )
 
-panel_3A
+print(panel_3A)
 
-# Figure 3B: RW2 temporal effect
+
+# ============================================================
+# 2. FIGURE 3B
+# National RW2 temporal effect
+# ============================================================
 
 panel_3B <- ggplot(
   temporal_effect,
@@ -2935,21 +3109,18 @@ panel_3B <- ggplot(
   geom_hline(
     yintercept = 0,
     linetype = "dashed",
-    linewidth = 0.4
+    linewidth = 0.4,
+    color = "grey50"
   ) +
   scale_x_date(
+    limits = c(
+      as.Date("2016-01-01"),
+      as.Date("2025-12-31")
+    ),
     date_breaks = "1 year",
-    date_labels = "%Y"
+    date_labels = "%Y",
+    expand = c(0, 0)
   ) +
-  scale_x_date(
-  limits = c(
-    as.Date("2016-01-01"),
-    as.Date("2025-12-31")
-  ),
-  date_breaks = "1 year",
-  date_labels = "%Y",
-  expand = c(0, 0)
-  ) + 
   labs(
     title = "National temporal effect",
     x = "Year",
@@ -2964,40 +3135,46 @@ panel_3B <- ggplot(
     axis.text.x = element_text(
       angle = 45,
       hjust = 1
-    )
-  )
-
-panel_3B <- panel_3B +
-  theme(
+    ),
     plot.margin = margin(
       t = 5,
-      r = 0,
+      r = 5,
       b = 5,
-      l = 0
+      l = 5
     )
   )
 
-panel_3B
+print(panel_3B)
 
-# Figure 3C:
-# Change in modeled relative incidence:
-# 2024-2025 versus 2016-2017
+
+# ============================================================
+# 3. FIGURE 3C
+# Change in modeled relative incidence
+#
+# 2024–2025 versus 2016–2017
+#
+# IRR is relative to the monthly national
+# municipality-level median modeled incidence.
+# ============================================================
 
 period_change <- st_rate_chik_region %>%
   mutate(
     period = case_when(
-      lubridate::year(ym_date) %in% 2016:2017 ~ "2016–2017",
-      lubridate::year(ym_date) %in% 2024:2025 ~ "2024–2025",
+      year(ym_date) %in% 2016:2017 ~ "2016–2017",
+      year(ym_date) %in% 2024:2025 ~ "2024–2025",
       TRUE ~ NA_character_
     )
   ) %>%
   filter(!is.na(period)) %>%
   group_by(code_muni, period) %>%
   summarise(
-    median_logIRR = median(log_IRR, na.rm = TRUE),
+    median_logIRR = median(
+      log_IRR,
+      na.rm = TRUE
+    ),
     .groups = "drop"
   ) %>%
-  tidyr::pivot_wider(
+  pivot_wider(
     names_from = period,
     values_from = median_logIRR
   ) %>%
@@ -3006,6 +3183,11 @@ period_change <- st_rate_chik_region %>%
       `2024–2025` - `2016–2017`
   )
 
+stopifnot(
+  nrow(period_change) == 5570L,
+  !anyNA(period_change$delta_logIRR)
+)
+
 change_sf <- muni_sf %>%
   select(code_muni, geometry) %>%
   left_join(
@@ -3013,15 +3195,13 @@ change_sf <- muni_sf %>%
     by = "code_muni"
   )
 
-q_change <- quantile(
-  abs(change_sf$delta_logIRR),
-  0.98,
-  na.rm = TRUE
-)
-
-states_sf_plot <- geobr::read_state(
-  year = 2020,
-  showProgress = FALSE
+# Symmetric color scale using 98th percentile
+q_change <- as.numeric(
+  quantile(
+    abs(change_sf$delta_logIRR),
+    probs = 0.98,
+    na.rm = TRUE
+  )
 )
 
 panel_3C <- ggplot(change_sf) +
@@ -3033,16 +3213,17 @@ panel_3C <- ggplot(change_sf) +
     data = states_sf_plot,
     fill = NA,
     color = "grey55",
-    linewidth = 0.18
+    linewidth = 0.18,
+    inherit.aes = FALSE
   ) +
   scale_fill_gradient2(
-    low = "#B2182B",
-    mid = "#F7F7F7",
-    high = "#2166AC",
+    low = col_negative,
+    mid = col_mid,
+    high = col_positive,
     midpoint = 0,
     limits = c(-q_change, q_change),
     oob = scales::squish,
-    name = expression("Change in log relative incidence")
+    name = "Change in\nlog relative incidence"
   ) +
   labs(
     title = "Change in modeled relative incidence",
@@ -3050,12 +3231,23 @@ panel_3C <- ggplot(change_sf) +
   ) +
   theme_void(base_size = 10) +
   theme(
-    plot.title = element_text(face = "bold", size = 12),
-    plot.subtitle = element_text(size = 10),
-    legend.position = "right"
+    plot.title = element_text(
+      face = "bold",
+      size = 12
+    ),
+    plot.subtitle = element_text(
+      size = 10
+    ),
+    legend.position = "right",
+    plot.margin = margin(5, 5, 5, 5)
   )
 
-panel_3C
+print(panel_3C)
+
+
+# ============================================================
+# 4. Regional summary of relative incidence change
+# ============================================================
 
 delta_region_summary <- period_change %>%
   mutate(
@@ -3067,21 +3259,44 @@ delta_region_summary <- period_change %>%
   ) %>%
   group_by(region) %>%
   summarise(
-    median_delta = median(delta_logIRR, na.rm = TRUE),
-    q25 = quantile(delta_logIRR, 0.25, na.rm = TRUE),
-    q75 = quantile(delta_logIRR, 0.75, na.rm = TRUE),
-    prop_increase = mean(delta_logIRR > 0, na.rm = TRUE),
+    n_municipalities = n(),
+    median_delta = median(
+      delta_logIRR,
+      na.rm = TRUE
+    ),
+    q25 = quantile(
+      delta_logIRR,
+      0.25,
+      na.rm = TRUE
+    ),
+    q75 = quantile(
+      delta_logIRR,
+      0.75,
+      na.rm = TRUE
+    ),
+    prop_increase = mean(
+      delta_logIRR > 0,
+      na.rm = TRUE
+    ),
     .groups = "drop"
   ) %>%
   arrange(desc(median_delta))
 
-delta_region_summary
+cat("\n=== REGIONAL CHANGE SUMMARY ===\n")
+print(delta_region_summary, n = Inf)
 
 
-library(patchwork)
+# ============================================================
+# 5. Assemble Figure 3
+#
+# Top row: Spatial effect | Relative incidence change
+# Bottom:  RW2 temporal effect
+# ============================================================
 
-figure3 <- (panel_3A | panel_3C) /
-           panel_3B +
+figure3 <- (
+  (panel_3A | panel_3C) /
+    panel_3B
+) +
   plot_layout(
     heights = c(1.0, 0.55)
   ) +
@@ -3095,20 +3310,48 @@ figure3 <- (panel_3A | panel_3C) /
     )
   )
 
-figure3
+print(figure3)
+
+figure3 <- figure3 &
+  theme(
+    plot.title = element_blank(),
+    plot.subtitle = element_blank()
+  )
+
+print(figure3)
+
+# ============================================================
+# 6. Temporal summaries
+# ============================================================
 
 temporal_summary <- temporal_effect %>%
   arrange(ym_date) %>%
   summarise(
-    max_effect = max(temporal_mean, na.rm = TRUE),
-    max_date = ym_date[which.max(temporal_mean)],
-    min_effect = min(temporal_mean, na.rm = TRUE),
-    min_date = ym_date[which.min(temporal_mean)]
+    max_effect = max(
+      temporal_mean,
+      na.rm = TRUE
+    ),
+    max_date = ym_date[
+      which.max(temporal_mean)
+    ],
+    min_effect = min(
+      temporal_mean,
+      na.rm = TRUE
+    ),
+    min_date = ym_date[
+      which.min(temporal_mean)
+    ]
   )
 
-temporal_summary
+cat("\n=== TEMPORAL EFFECT SUMMARY ===\n")
+print(temporal_summary)
+
+
+# Peak month within each year
 temporal_yearly <- temporal_effect %>%
-  mutate(year = lubridate::year(ym_date)) %>%
+  mutate(
+    year = lubridate::year(ym_date)
+  ) %>%
   group_by(year) %>%
   slice_max(
     temporal_mean,
@@ -3122,41 +3365,126 @@ temporal_yearly <- temporal_effect %>%
     peak_effect = temporal_mean
   )
 
-temporal_yearly
-temporal_effect %>%
+
+# Top 10 months across entire study period
+temporal_top10 <- temporal_effect %>%
   arrange(desc(temporal_mean)) %>%
   slice_head(n = 10)
 
+cat("\n=== TOP 10 TEMPORAL EFFECT MONTHS ===\n")
+print(temporal_top10)
 
 
-#Table 1
+# ============================================================
+# 7. TABLE 1
+# Primary residence-based negative-binomial model
+#
+# Automatically extract current posterior summaries.
+# ============================================================
 
-table1 <- tibble::tribble(
-  ~Parameter, ~`Posterior mean`, ~`95% CrI`,
-  "Intercept", "-16.030", "-16.465 to -15.596",
-  "log(Population)", "1.242", "1.198 to 1.287",
-  "Negative-binomial size", "0.169", "0.165 to 0.173",
-  "Spatial precision", "0.235", "0.217 to 0.256",
-  "BYM2 mixing parameter, \u03c6", "0.788", "0.735 to 0.828",
-  "Temporal precision", "3.823", "2.838 to 5.220",
-  "Space-time interaction precision", "0.564", "0.546 to 0.584"
+fixed_tab <- fit_chik_nb$summary.fixed %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Parameter") %>%
+  select(
+    Parameter,
+    mean,
+    `0.025quant`,
+    `0.975quant`
+  )
+
+hyper_tab <- fit_chik_nb$summary.hyperpar %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Parameter") %>%
+  select(
+    Parameter,
+    mean,
+    `0.025quant`,
+    `0.975quant`
+  )
+
+table1 <- bind_rows(
+  fixed_tab,
+  hyper_tab
+) %>%
+  mutate(
+    Parameter = dplyr::recode(
+      Parameter,
+      "(Intercept)" = "Intercept",
+      "log(POP)" = "log(Population)",
+      "size for the nbinomial observations (1/overdispersion)" =
+        "Negative-binomial size",
+      "Precision for space" = "Spatial precision",
+      "Phi for space" = "BYM2 mixing parameter, phi",
+      "Precision for time" = "Temporal precision",
+      "Precision for st_id" =
+        "Space-time interaction precision"
+    ),
+    `Posterior mean` = sprintf(
+      "%.3f",
+      mean
+    ),
+    `95% CrI` = sprintf(
+      "%.3f to %.3f",
+      `0.025quant`,
+      `0.975quant`
+    )
+  ) %>%
+  select(
+    Parameter,
+    `Posterior mean`,
+    `95% CrI`
+  )
+
+cat("\n=== TABLE 1: PRIMARY MODEL ===\n")
+print(table1)
+
+
+# ============================================================
+# 8. Primary model sample size and fit statistics
+# ============================================================
+
+cat("\n=== PRIMARY MODEL INFORMATION ===\n")
+
+cat(
+  "Municipality-month observations:",
+  nrow(panel_chik_full),
+  "\n"
 )
 
-table1
+cat(
+  "Municipalities:",
+  dplyr::n_distinct(panel_chik_full$code_muni),
+  "\n"
+)
+
+cat(
+  "Observed cases:",
+  sum(panel_chik_full$cases, na.rm = TRUE),
+  "\n"
+)
+
+cat(
+  "DIC:",
+  fit_chik_nb$dic$dic,
+  "\n"
+)
+
+cat(
+  "WAIC:",
+  fit_chik_nb$waic$waic,
+  "\n"
+)
 
 
+# ============================================================
+# 9. Center-West sensitivity models
 
-cat("\n=== TYPE I FIXED EFFECTS ===\n")
 print(fit_cw_type1$summary.fixed)
-
-cat("\n=== TYPE IV FIXED EFFECTS ===\n")
 print(fit_cw_type4$summary.fixed)
 
-cat("\n=== TYPE I HYPERPARAMETERS ===\n")
 print(fit_cw_type1$summary.hyperpar)
-
-cat("\n=== TYPE IV HYPERPARAMETERS ===\n")
 print(fit_cw_type4$summary.hyperpar)
+
 ```
 
 
@@ -3169,3 +3497,12 @@ cat("R version:", R.version.string, "\n")
 cat("INLA version:", as.character(packageVersion("INLA")), "\n")
 print(Sys.info()[c("sysname", "release", "machine")])
 ```
+
+
+
+
+
+
+
+
+
