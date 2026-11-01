@@ -12,6 +12,7 @@ Run the commands below from the repository root. `analysis/00_paths.R` supplies 
 | Source population | `population/` at the repository root |
 | `RESULTS_DIR` | `<repository>/results` |
 | `CHIKV_RESULTS_DIR` | Optional absolute or repository-relative override for generated artifacts and existing fit caches |
+| `CHIKV_PREP_CACHE_DIR` | Optional separate **read location** for `Chik_total.rds`, `pop_panel_total.rds`, `pop_panel_age.rds`; defaults to `RESULTS_DIR`. Module 01/02 outputs still write to `RESULTS_DIR` and never to this override |
 | `CHIKV_ROLLING_RUN_DIR` | Optional absolute or repository-relative override for the historical HPC rolling-run root; default `<RESULTS_DIR>/hpc_residence_20261028` |
 | `CHIKV_SHARED_COMPONENT_DIR` | Optional root containing saved annual shared-component fits; default `<RESULTS_DIR>/shared_component_residence_20261030` |
 | `CHIKV_ROLLING_INPUT_DIR` | Optional input-cache directory for modules 14/15; by default 14 also searches historical run dirs and `RESULTS_DIR`, whereas 15 reads directly from its historical run root |
@@ -23,11 +24,15 @@ Environment variables can be supplied without editing source code. For an existi
 
 ```sh
 export CHIKV_RESULTS_DIR="$HOME/Downloads/inla_results"
+# Required preparation RDSs found in a separate dated historical run:
+export CHIKV_PREP_CACHE_DIR="$HOME/Downloads/inla_results/hpc_residence_20261028"
 export CHIKV_ROLLING_RUN_DIR="$HOME/Downloads/inla_results/hpc_residence_20261028"
 export CHIKV_SHARED_COMPONENT_DIR="$HOME/Downloads/inla_results/shared_component_residence_20261030"
 # Only when the cached rolling inputs live somewhere else:
 # export CHIKV_ROLLING_INPUT_DIR="/absolute/path/to/verified/rolling-inputs"
 ```
+
+For a cache-only preflight in this layout, use `Rscript scripts/preflight.R --report-dir results/preflight`. This checks preparation RDSs in `CHIKV_PREP_CACHE_DIR`, while other artifacts remain checked relative to `RESULTS_DIR`. **It does not validate object contents**, and the remaining non-preparation entries are an inventory of the specified results root, not a proof that every module will read the same HPC run. Clear `CHIKV_PREP_CACHE_DIR` or point it at freshly generated inputs before intentionally running modules 01/02 or using their new caches; 01/02 write to `RESULTS_DIR`.
 
 The date-stamped subdirectories preserve **run identity**, not a constant scientific parameter. Do not merge caches from different runs simply because filenames match. These settings select files; they do not create missing fitted models or validate their scientific provenance.
 

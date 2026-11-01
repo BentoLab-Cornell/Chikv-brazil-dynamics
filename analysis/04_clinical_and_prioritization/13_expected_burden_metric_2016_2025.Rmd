@@ -36,13 +36,13 @@ This step uses the already-completed population panels and INLA posterior rates.
 
 ```{r load-inputs}
 if (!exists("pop_panel_total")) {
-  if (!file.exists(result_path("pop_panel_total.rds"))) stop("pop_panel_total.rds not found in RESULTS_DIR.")
-  pop_panel_total <- readRDS(result_path("pop_panel_total.rds"))
+  if (!file.exists(prep_cache_path("pop_panel_total.rds"))) stop("pop_panel_total.rds not found in PREP_CACHE_DIR: ", PREP_CACHE_DIR)
+  pop_panel_total <- readRDS(prep_cache_path("pop_panel_total.rds"))
 }
 
 if (!exists("pop_panel_age")) {
-  if (!file.exists(result_path("pop_panel_age.rds"))) stop("pop_panel_age.rds not found in RESULTS_DIR.")
-  pop_panel_age <- readRDS(result_path("pop_panel_age.rds"))
+  if (!file.exists(prep_cache_path("pop_panel_age.rds"))) stop("pop_panel_age.rds not found in PREP_CACHE_DIR: ", PREP_CACHE_DIR)
+  pop_panel_age <- readRDS(prep_cache_path("pop_panel_age.rds"))
 }
 
 st_rate_path <- file.path(results_dir, "st_rate_chik_region_2016_2025.rds")

@@ -29,9 +29,9 @@ irr_path <- file.path(
   "st_rate_chik_region_2016_2025.rds"
 )
 
-# Revised Step-02 caches are stored under RESULTS_DIR.
-pop_total_path <- result_path("pop_panel_total.rds")
-pop_age_path   <- result_path("pop_panel_age.rds")
+# Read cached population inputs from PREP_CACHE_DIR (defaults to RESULTS_DIR).
+pop_total_path <- prep_cache_path("pop_panel_total.rds")
+pop_age_path   <- prep_cache_path("pop_panel_age.rds")
 
 required_files <- c(
   irr_path,

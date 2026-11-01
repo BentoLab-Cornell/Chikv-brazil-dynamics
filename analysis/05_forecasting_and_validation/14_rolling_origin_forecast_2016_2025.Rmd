@@ -58,7 +58,7 @@ dir.create(PRED_DIR, recursive = TRUE, showWarnings = FALSE)
 INPUT_DIRS <- unique(c(
   RESULT_ROOT,
   file.path(RESULT_ROOT, "results"),
-  configured_path("CHIKV_ROLLING_INPUT_DIR", RESULTS_DIR)
+  configured_path("CHIKV_ROLLING_INPUT_DIR", PREP_CACHE_DIR)
 ))
 
 find_input <- function(filename) {

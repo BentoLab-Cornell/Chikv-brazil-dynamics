@@ -40,6 +40,11 @@ configured_path <- function(env_var, default_path) {
   }
   normalizePath(path, winslash = "/", mustWork = FALSE)
 }
+PREP_CACHE_DIR <- configured_path("CHIKV_PREP_CACHE_DIR", RESULTS_DIR)
+# Preparation caches may be archived with an HPC run. Read only from the
+# explicitly configured source; writing regenerated caches still uses result_path().
+prep_cache_path <- function(filename) file.path(PREP_CACHE_DIR, filename)
+
 rolling_run_dir <- function() {
   configured_path("CHIKV_ROLLING_RUN_DIR", result_path("hpc_residence_20261028"))
 }

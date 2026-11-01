@@ -5,7 +5,7 @@ This audit separates **safe source-code portability cleanup** from **scientific 
 ## What the portability patch changes
 
 - All DBC input paths in module 01 use `CHIK_DATA_DIR`. Module 18 uses the same location for the separate provisional 2026 input.
-- Modules 01/02 write their intentionally regenerated preparation RDS caches to `RESULTS_DIR`; modules 06/07/12/13/18/19/20/21 use configured paths for files and outputs.
+- Modules 01/02 write their intentionally regenerated preparation RDS caches to `RESULTS_DIR`; existing preparation caches can be read without copies via explicit `CHIKV_PREP_CACHE_DIR`. The preflight, runner, and reading sites in modules 07/13/14/20 respect that configured read location. Other modules 06/07/12/13/18/19/20/21 use configured result paths.
 - Modules 14/15/17 retain the historical `hpc_residence_20261028` directory structure, configurable via `CHIKV_ROLLING_RUN_DIR`. Modules 14/15 preserve the exact historical `Chik_total_residence_corrected.rds` filename by default; change this only with verified cohort provenance using `CHIKV_ROLLING_CASE_CACHE` and, if needed, `CHIKV_ROLLING_INPUT_DIR`.
 - Module 11 retains `shared_component_residence_20261030` under `CHIKV_SHARED_COMPONENT_DIR`; both modules 11 and 14 block missing-cache INLA fitting by default. The opt-in environment variable is `CHIKV_ALLOW_MODEL_FITTING=true`.
 - Module 06 and module 18 can load verified geometry via `CHIKV_MUNI_GEOMETRY_PATH`. Existing geobr fallback behavior remains. A graph with the correct node count is **not** alone evidence of correct municipality order.
@@ -14,7 +14,7 @@ This audit separates **safe source-code portability cleanup** from **scientific 
 ## Before running any analysis
 
 1. Preserve **copies** of all original fit RDS, prediction CSV, scoring CSV, run logs and manuscript figures. Do not point a newly executed module at your sole archived production output folder.
-2. Set `CHIKV_RESULTS_DIR` to a separate working result directory for fresh preparation runs, or to a **read-only / backed-up** archive only for cache-reading and figure inspection. Running module 01 or 02 intentionally writes caches, and some other notebooks write derived outputs.
+2. Set `CHIKV_RESULTS_DIR` to a separate working result directory for fresh preparation runs, or to a **read-only / backed-up** archive only for cache-reading and figure inspection. If the three preparation caches are in an HPC subfolder, set `CHIKV_PREP_CACHE_DIR` to that folder for cache-only checks. Running module 01 or 02 intentionally writes caches under `RESULTS_DIR`, not `CHIKV_PREP_CACHE_DIR`; clear the latter before consuming freshly regenerated caches. Some other notebooks also write derived outputs.
 3. Set `CHIKV_ROLLING_RUN_DIR` and `CHIKV_SHARED_COMPONENT_DIR` to the correct production-run directories if they differ from the default. Never assume identical names imply compatible results.
 4. Start with `Rscript scripts/preflight.R --source-only` and check package versions. The preflight is structural, not a reproduction of the scientific results. Only intentionally execute selected modules.
 

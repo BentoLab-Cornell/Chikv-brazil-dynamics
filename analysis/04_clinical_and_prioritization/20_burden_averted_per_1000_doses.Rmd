@@ -79,7 +79,7 @@ PRIORITY_PATH <- file.path(
   "priority_rule_evaluation_municipality_2024_2025.csv"
 )
 
-POP_AGE_PATH <- result_path("pop_panel_age.rds")
+POP_AGE_PATH <- prep_cache_path("pop_panel_age.rds")
 
 required_files <- c(
   ST_RATE_PATH,

@@ -74,10 +74,13 @@ inventory <- tryCatch({
 record("inventory", "docs/REQUIRED_ARTIFACTS.csv", !is.null(inventory), inventory_error)
 if (!source_only && !is.null(inventory)) {
   for (i in seq_len(nrow(inventory))) {
-    p <- result_path(inventory$path[i])
+    prep_artifact <- inventory$path[i] %in% c(
+      "Chik_total.rds", "pop_panel_total.rds", "pop_panel_age.rds"
+    )
+    p <- if (prep_artifact) prep_cache_path(inventory$path[i]) else result_path(inventory$path[i])
     info <- file.info(p)
     record("artifact", inventory$path[i], !is.na(info$size) && info$size > 0 && !info$isdir,
-           paste("Producer:", inventory$producer[i], "Consumer:", inventory$consumer[i],
+           paste("Checked:", p, "Producer:", inventory$producer[i], "Consumer:", inventory$consumer[i],
                  inventory$notes[i]), optional = inventory$requirement[i] != "required")
   }
 }
