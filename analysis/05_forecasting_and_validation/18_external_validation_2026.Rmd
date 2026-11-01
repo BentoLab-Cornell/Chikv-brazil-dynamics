@@ -140,7 +140,7 @@ cat(
 MUNI_PATH_CANDIDATES <- c(
   file.path(getwd(), "muni_sf_2020.rds"),
   file.path(RESULT_ROOT, "muni_sf_2020.rds"),
-  configured_path("CHIKV_MUNI_GEOMETRY_PATH", path.expand("~/muni_sf_2020.rds"))
+  configured_path("CHIKV_MUNI_GEOMETRY_PATH", result_path("muni_sf_2020.rds"))
 )
 
 muni_hit <- MUNI_PATH_CANDIDATES[file.exists(MUNI_PATH_CANDIDATES)]

@@ -17,8 +17,6 @@ find_project_root <- function(start = getwd()) {
 }
 
 PROJECT_ROOT <- find_project_root()
-CHIK_DATA_DIR <- file.path(PROJECT_ROOT, "chikungunya")
-IBGE_DOWNLOADS_DIR <- file.path(PROJECT_ROOT, "population")
 RAW_DBC_DIR <- PROJECT_ROOT
 
 .results_setting <- path.expand(Sys.getenv("CHIKV_RESULTS_DIR", unset = "results"))
@@ -40,6 +38,8 @@ configured_path <- function(env_var, default_path) {
   }
   normalizePath(path, winslash = "/", mustWork = FALSE)
 }
+CHIK_DATA_DIR <- configured_path("CHIKV_CHIK_DATA_DIR", file.path(PROJECT_ROOT, "chikungunya"))
+IBGE_DOWNLOADS_DIR <- configured_path("CHIKV_POPULATION_DIR", file.path(PROJECT_ROOT, "population"))
 PREP_CACHE_DIR <- configured_path("CHIKV_PREP_CACHE_DIR", RESULTS_DIR)
 # Preparation caches may be archived with an HPC run. Read only from the
 # explicitly configured source; writing regenerated caches still uses result_path().

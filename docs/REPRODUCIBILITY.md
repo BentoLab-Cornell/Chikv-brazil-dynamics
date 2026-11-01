@@ -8,8 +8,8 @@ Run the commands below from the repository root. `analysis/00_paths.R` supplies 
 
 | Setting | Default / meaning |
 |---|---|
-| Source surveillance | `chikungunya/` at the repository root |
-| Source population | `population/` at the repository root |
+| Source surveillance | `chikungunya/` at the repository root, or `CHIKV_CHIK_DATA_DIR` |
+| Source population | `population/` at the repository root, or `CHIKV_POPULATION_DIR` |
 | `RESULTS_DIR` | `<repository>/results` |
 | `CHIKV_RESULTS_DIR` | Optional absolute or repository-relative override for generated artifacts and saved model inputs |
 | `CHIKV_PREP_CACHE_DIR` | Optional separate directory containing `Chik_total.rds`, `pop_panel_total.rds`, `pop_panel_age.rds`; defaults to `RESULTS_DIR` |
