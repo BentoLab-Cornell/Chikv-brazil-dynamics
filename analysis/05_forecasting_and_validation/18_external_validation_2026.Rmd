@@ -31,7 +31,7 @@ source("00_setup.R")
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-RESULT_ROOT <- RESULTS_DIR
+RESULT_ROOT <- path.expand("~/Downloads/inla_results")
 OUT_DIR <- file.path(RESULT_ROOT, "external_validation_2026")
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -44,14 +44,19 @@ PRIORITY_PATH <- file.path(
 # Existing one-year-ahead 2025 rolling-origin prediction produced by File 14.
 # This is a through-2024 forecast for 2025; it is NOT a through-2025 forecast for 2026.
 ROLLING_2025_PATH <- file.path(
-  RESULT_ROOT,
-  "rolling_origin",
+  path.expand("~/Downloads/inla_results/hpc_residence_20261028"),
+  "results",
+  "rolling_origin_residence",
   "predictions",
   "forecast_annual_predict_2025.csv"
 )
 
 # Raw 2026 DBC used only for external validation.
-CHIK26_PATH <- file.path(CHIK_DATA_DIR, "CHIKBR26.dbc")
+CHIK26_PATH <- file.path(
+  RAW_DBC_DIR,
+  "CHIKdata",
+  "CHIKBR26.dbc"
+)
 
 cat("Top-third municipality count:", TOP_N, "\n")
 cat("Priority ranking:", PRIORITY_PATH, "\n")
@@ -133,7 +138,11 @@ cat(
 # 3. Fixed municipality lookup
 
 ```{r municipality-lookup}
-MUNI_PATH_CANDIDATES <- result_path("muni_sf_2020.rds")
+MUNI_PATH_CANDIDATES <- c(
+  file.path(getwd(), "muni_sf_2020.rds"),
+  file.path(RESULT_ROOT, "muni_sf_2020.rds"),
+  path.expand("~/muni_sf_2020.rds")
+)
 
 muni_hit <- MUNI_PATH_CANDIDATES[file.exists(MUNI_PATH_CANDIDATES)]
 
@@ -190,7 +199,7 @@ decode_age_years_2026 <- function(x) {
 chik26_confirmed <- Chik_2026 %>%
   mutate(
     code_muni = stringr::str_pad(
-      substr(as.character(ID_MUNICIP), 1, 6),
+      substr(as.character(ID_MN_RESI), 1, 6),
       width = 6, side = "left", pad = "0"
     ),
     age_years = decode_age_years_2026(NU_IDADE_N),

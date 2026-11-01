@@ -30,9 +30,19 @@ TARGET_YEARS <- 2017:2025
 EXPECTED_N_MUNI <- 5570L
 TOP_N <- ceiling(EXPECTED_N_MUNI / 3)
 
-results_dir <- RESULTS_DIR
-pred_dir <- file.path(results_dir, "rolling_origin", "predictions")
-score_dir <- file.path(results_dir, "rolling_origin", "scoring")
+results_dir <- path.expand(
+  "~/Downloads/inla_results/hpc_residence_20261028"
+)
+
+pred_dir <- file.path(
+  results_dir, "results",
+  "rolling_origin_residence", "predictions"
+)
+
+score_dir <- file.path(
+  results_dir, "results",
+  "rolling_origin_residence", "scoring"
+)
 
 dir.create(score_dir, recursive = TRUE, showWarnings = FALSE)
 
@@ -43,19 +53,13 @@ cat("Matched top-third municipality count:", TOP_N, "\n")
 # 1. Load completed inputs
 
 ```{r load-inputs}
-if (!exists("pop_panel_age")) {
-  if (!file.exists(result_path("pop_panel_age.rds"))) {
-    stop("pop_panel_age.rds not found in RESULTS_DIR: ", RESULTS_DIR)
-  }
-  pop_panel_age <- readRDS(result_path("pop_panel_age.rds"))
-}
+pop_panel_age <- readRDS(
+  file.path(results_dir, "pop_panel_age.rds")
+)
 
-if (!exists("Chik_total")) {
-  stop(
-    "Chik_total is not in memory. Run the revised 01_data_import_cleaning.Rmd first, ",
-    "then run this scoring file."
-  )
-}
+Chik_total <- readRDS(
+  file.path(results_dir, "Chik_total_residence_corrected.rds")
+)
 
 stopifnot(
   n_distinct(pop_panel_age$code_muni) == EXPECTED_N_MUNI
@@ -83,28 +87,10 @@ cat("All 9 prediction files found.\n")
 `Chik_total` is already the confirmed 2016-2025 analytic dataset. Observed outcomes are aggregated by municipality and notification year.
 
 ```{r observed-outcomes}
-observed_annual <- Chik_total %>%
-  mutate(
-    code_muni = stringr::str_pad(
-      substr(as.character(ID_MUNICIP), 1, 6),
-      width = 6,
-      side = "left",
-      pad = "0"
-    ),
-    year = lubridate::year(as.Date(DT_SIN_PRI)),
-    death = as.integer(as.character(EVOLUCAO) == "2")
-  ) %>%
-  filter(
-    CLASSI_FIN %in% c(1, 13),
-    year %in% STUDY_START:STUDY_END,
-    !is.na(code_muni)
-  ) %>%
-  group_by(code_muni, year) %>%
-  summarise(
-    cases = n(),
-    deaths = sum(death, na.rm = TRUE),
-    .groups = "drop"
-  )
+
+
+
+# 2. Standardize municipality IDs and build observed annual outcomes
 
 muni_universe <- pop_panel_age %>%
   transmute(
@@ -120,6 +106,29 @@ muni_universe <- pop_panel_age %>%
 
 stopifnot(nrow(muni_universe) == EXPECTED_N_MUNI)
 
+observed_annual <- Chik_total %>%
+  mutate(
+    code_muni = stringr::str_pad(
+      substr(as.character(ID_MN_RESI), 1, 6),
+      width = 6,
+      side = "left",
+      pad = "0"
+    ),
+    year = lubridate::year(as.Date(DT_SIN_PRI)),
+    death = as.integer(as.character(EVOLUCAO) == "2")
+  ) %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    year %in% STUDY_START:STUDY_END,
+    code_muni %in% muni_universe$code_muni
+  ) %>%
+  group_by(code_muni, year) %>%
+  summarise(
+    cases = n(),
+    deaths = sum(death, na.rm = TRUE),
+    .groups = "drop"
+  )
+
 annual_grid <- tidyr::crossing(
   code_muni = muni_universe$code_muni,
   year = STUDY_START:STUDY_END
@@ -133,6 +142,8 @@ annual_grid <- tidyr::crossing(
 cat("Observed annual grid rows:", nrow(annual_grid), "\n")
 cat("Observed cases 2016-2025:", sum(annual_grid$cases), "\n")
 cat("Observed deaths 2016-2025:", sum(annual_grid$deaths), "\n")
+
+
 ```
 
 # 3. Build the age-only baseline using past-only information
@@ -952,7 +963,6 @@ make_delta <- function(outcome_name) {
     ) +
     scale_x_continuous(breaks = 2017:2025) +
     scale_y_continuous(
-      limits = c(-12, 12),
       breaks = c(-10, -5, 0, 5, 10),
       labels = function(x) {
         ifelse(x > 0, paste0("+", x), as.character(x))
