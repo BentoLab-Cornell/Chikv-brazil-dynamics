@@ -1,105 +1,76 @@
-# Reproducibility guide
+# Running the analyses
 
-This repository contains research source and source-data files plus packaging helpers. It is not yet a complete archived production run. The helpers standardize paths and make missing prerequisites visible; they do not certify the results or complete the pending scientific checks.
+The repository includes surveillance inputs, cleaned population files and the R analysis code. Some model fits and forecasts were produced separately on HPC and must be supplied to rerun the corresponding downstream notebooks.
 
-## Configuration
+## File paths
 
-Run the commands below from the repository root. `analysis/00_paths.R` supplies path configuration; `analysis/00_setup.R` loads it alongside the research packages.
+Run commands from the repository root. `analysis/00_paths.R` defines the paths used by the notebooks; `analysis/00_setup.R` loads them.
 
-| Setting | Default / meaning |
+| Variable | Location |
 |---|---|
-| Source surveillance | `chikungunya/` at the repository root, or `CHIKV_CHIK_DATA_DIR` |
-| Source population | `population/` at the repository root, or `CHIKV_POPULATION_DIR` |
-| `RESULTS_DIR` | `<repository>/results` |
-| `CHIKV_RESULTS_DIR` | Optional absolute or repository-relative override for generated artifacts and saved model inputs |
-| `CHIKV_PREP_CACHE_DIR` | Optional separate directory containing `Chik_total.rds`, `pop_panel_total.rds`, `pop_panel_age.rds`; defaults to `RESULTS_DIR` |
-| `CHIKV_ROLLING_RUN_DIR` | Optional directory containing the historical `results/rolling_origin_residence/` and `results/secondary_forecast_2016_2022_residence/` trees |
-| `CHIKV_SHARED_COMPONENT_DIR` | Optional directory containing `fit_shared_YEAR.rds` (2016–2025) |
-| `CHIKV_ROLLING_INPUT_DIR` | Optional directory for rolling-origin case and population RDS inputs |
-| `CHIKV_ROLLING_CASE_CACHE` | Optional alternative basename of the rolling-origin case RDS (default `Chik_total_residence_corrected.rds`) |
-| `CHIKV_MUNI_GEOMETRY_PATH` | Optional full path to a saved `muni_sf_2020.rds` geometry file |
-| `CHIKV_ALLOW_MODEL_FITTING` | Defined helper; configuring paths does not prevent the original fitting code in modules 11/14 from running if caches are missing |
+| `CHIKV_CHIK_DATA_DIR` | SINAN DBC files; defaults to `chikungunya/` |
+| `CHIKV_POPULATION_DIR` | Annual population CSVs; defaults to `population/` |
+| `CHIKV_RESULTS_DIR` | Main results directory; defaults to `results/` |
+| `CHIKV_PREP_CACHE_DIR` | Cached `Chik_total.rds`, `pop_panel_total.rds`, `pop_panel_age.rds`; defaults to the results directory |
+| `CHIKV_ROLLING_RUN_DIR` | Archived rolling-origin and secondary-forecast run; defaults to `RESULTS_DIR/hpc_residence_20261028` |
+| `CHIKV_SHARED_COMPONENT_DIR` | Annual shared-component fits; defaults to `RESULTS_DIR/shared_component_residence_20261030` |
+| `CHIKV_ROLLING_INPUT_DIR` | Separate directory for rolling-origin case and population inputs |
+| `CHIKV_ROLLING_CASE_CACHE` | Rolling-origin case filename; defaults to `Chik_total_residence_corrected.rds` |
+| `CHIKV_MUNI_GEOMETRY_PATH` | Path to a saved `muni_sf_2020.rds` file |
 
-To use local files without editing analysis code, set the paths for your own machine before running a selected module:
+Set paths for your machine before running R. For example:
 
 ```sh
-export CHIKV_RESULTS_DIR="/path/to/local/inla_results"
-export CHIKV_PREP_CACHE_DIR="/path/to/local/prepared_rds"
-export CHIKV_ROLLING_RUN_DIR="/path/to/local/archived_hpc_run"
-export CHIKV_SHARED_COMPONENT_DIR="/path/to/local/shared_component_fits"
-# Optional when rolling inputs are in another folder:
-# export CHIKV_ROLLING_INPUT_DIR="/path/to/local/rolling_inputs"
+export CHIKV_RESULTS_DIR="/path/to/inla_results"
+export CHIKV_PREP_CACHE_DIR="/path/to/prepared_rds"
+export CHIKV_ROLLING_RUN_DIR="/path/to/hpc_run"
+export CHIKV_SHARED_COMPONENT_DIR="/path/to/shared_component_fits"
 ```
 
-Keep the existing RDS/CSV basenames and subdirectory structure. These variables select where files are stored; they do not supply missing inputs, install R packages, or refit the primary INLA model automatically. If your files are already organized under one results root, the optional variables can retain their defaults.
+The archived rolling and secondary forecast files keep their existing directory structure beneath `CHIKV_ROLLING_RUN_DIR/results/`. The [data inventory](DATA_INVENTORY.md) lists the expected filenames.
 
-Keep raw inputs separate from generated outputs. Use an empty output directory for a fresh execution check, or a documented directory containing the matching production caches. A cache's existence alone does not establish compatibility: preserve input hashes, case definition, municipality keys/order, model specification, software versions and the generating commit with each production artifact.
-
-## 1. Non-analytical preflight
+## Checks
 
 ```sh
+# Input files and source syntax
 Rscript scripts/preflight.R --source-only
+
+# Also check installed packages and saved artifacts
+Rscript scripts/preflight.R
+
+# Optional: write a file-by-file report
 Rscript scripts/preflight.R --report-dir results/preflight
 ```
 
-`--source-only` checks required CHIK/population file presence, R/R Markdown syntax and the artifact-inventory file. The full check additionally inventories installed-package versions and required caches. It does not test package loadability or compatibility. `--report-dir` writes checks, input checksums and a session record, plus installed-package versions in full mode. Neither command imports patient records, fits models, downloads inputs or checks reported estimates. Full-check exit status 2 indicates missing prerequisites; a source-only pass does not imply that modeling dependencies or production outputs are present.
+These commands do not run the analyses. The full check reports missing required files as `MISSING_OR_INVALID` and optional files as `PENDING`. It checks whether packages are installed, not whether every package can be loaded successfully or matches the original HPC environment.
 
-To inventory a separate cache directory:
+## R environment
 
-```sh
-CHIKV_RESULTS_DIR=/absolute/path/chikv-results Rscript scripts/preflight.R
-```
+The notebooks use R with `knitr`, `read.dbc`, `dplyr`, `tidyr`, `readr`, `readxl`, `ggplot2`, `sf`, `geobr`, `spdep`, `INLA` and other packages listed in `analysis/00_setup.R` and the individual scripts. System libraries may be needed for spatial packages.
 
-## 2. Software environment
+A production lockfile is not available. The original installation source and version of `read.dbc`, along with the full production package environment, still need to be documented. The installed-package report describes the computer on which the check was run.
 
-R is required. The runner uses `knitr`; the research modules use packages including `read.dbc`, `dplyr`, `tidyr`, `readr`, `readxl`, `stringr`, `lubridate`, `tibble`, `purrr`, `ggplot2`, `sf`, `geobr`, `spdep` and `INLA`, with additional plotting/ancillary packages listed in `analysis/00_setup.R` and individual modules. Because shared setup loads ancillary dependencies too, package availability should be checked before selecting a module.
+Some notebooks download municipality geometry using `geobr` when no cached copy is present. Reusing the original geometry and adjacency files is preferable when checking saved model outputs.
 
-There is no verified production lockfile in this release. In particular, a tested `read.dbc` installation source/version and the production R/INLA environment must be recorded by the authors. Installing a current package version is not evidence that it matches the production fit. `sf` and related packages may also need platform-specific system libraries. Do not infer exact production settings from successful package installation.
-
-The package/version list produced by preflight describes the checking environment, not an authenticated production environment.
-
-Some modules retrieve geometry through `geobr` when cached geometry is absent. Record the actual source version and retrieval date; a run using newly retrieved geometry is not automatically the archived production run.
-
-## 3. Explicit module execution
+## Running selected notebooks
 
 ```sh
 Rscript scripts/run_module.R 01 02
 ```
 
-The requested modules execute sequentially in one R process. The example prepares case/population objects and their caches; it is an analysis action, unlike preflight. Markdown notebook reports, a module run log and a session record are written to timestamped folders under `<RESULTS_DIR>/reports`. The runner can load standard cached case/population objects when present. It does not automatically execute every dependency or every numbered module.
+The command above runs modules 01 and 02 in the same R process and writes reports to `RESULTS_DIR/reports/`. Other modules may need objects prepared in that session or saved outputs from earlier work. See the [module guide](MODULE_TO_RESULT.md) before choosing a sequence.
 
-Use the [module map](MODULE_TO_RESULT.md) to select only the intended work. The dependency outline is:
+Module 06 reads saved primary and sensitivity models; the fitting call in that notebook is commented out. Module 17 also reads saved predictions and scores rather than fitting the original longer-horizon model. Modules 11 and 14 contain active model fitting code. If the required fit is absent, running either notebook can start a lengthy fit.
 
-| Stage | Required preceding inputs | Modules |
-|---|---|---|
-| Import and population preparation | Included CHIK DBCs and population CSVs; geometry where requested | 01, 02 |
-| Descriptive results and cohort checks | Prepared case/population objects | 03, 04, 10, 16 |
-| Primary spatial results | Prepared objects plus identified primary/sensitivity fits | 06 |
-| Case/death shared spatial results | Prepared objects, health-region geography and saved annual fits or a deliberately authorized fit | 11 |
-| Combined ranking and simple benchmark | Prepared objects and primary fitted-incidence output | 13 |
-| Rolling evaluation | Prepared objects plus rolling fits/predictions | 14, then 15 |
-| Longer-horizon evaluation | Archived through-2022 prediction/scoring files | 17 |
-| Partial 2026 evaluation | Pre-2026 ranking output and CHIKBR26.dbc; 2025 prediction is an additional comparison | 18 |
-| Score-window sensitivity | Primary fitted-incidence output and ranking output | 19 |
-| Equal-dose illustration | Primary fitted incidence, ranking output and age-population panel | 20 |
+## Reproducing the reported results
 
-This is a dependency guide, not a tested one-command workflow. Several modules contain mixed scope or session-object assumptions; see the map before execution.
+A successful preflight confirms that local files and dependencies can be found. It does not establish that a saved fit corresponds to the published model or reproduce the HPC run.
 
-## 4. Saved fits and expensive work
+For a complete production archive, the following information is still needed:
 
-Module 06's primary fitting block remains commented. Its `run_heavy_models` parameter alone does not execute that block or establish how the reported fit was produced. Module 17 likewise uses saved outputs rather than implementing its production fitter. The authors must provide the exact production fitting route and fit identity.
+- The executable fitting scripts and saved model outputs (or keyed posterior and prediction summaries), together with input checksums and run logs.
+- Source and release details for the SINAN extracts and the annual IBGE population files, including the transformations used to construct the cleaned files.
+- Model settings, software versions, municipality ordering and population vintages used in the forecasting runs.
+- A record linking each submitted table or figure to its source output.
 
-The active fitting paths in modules 11 and 14 require explicit `CHIKV_ALLOW_MODEL_FITTING=true` when a fit is needed. This guard prevents unintended computation; it does not verify model specifications or archive missing outputs. No model fitting is required for the preflight or repository packaging checks.
-
-For reproducing tables and figures from cached runs, supply the artifacts listed in [the inventory](DATA_INVENTORY.md), preserving their relative subdirectories beneath `RESULTS_DIR`. Missing model fits are not replaced with invented or approximate results.
-
-## 5. Evidence still needed for a reproducible release
-
-1. **Production records:** identify the generating code commit, exact executable fit route, input hashes and keyed output files for each reported result. Supply required fits or sufficient keyed posterior/prediction summaries and the associated logs.
-2. **Source provenance:** archive surveillance extraction/version metadata and the authoritative IBGE sources and transformations used for each annual total/age population file. Distinguish the 2026 extraction date from the latest symptom-onset date.
-3. **Scientific reconciliation:** confirm notification versus residence attribution, fixed-boundary handling, age/cohort rules and their effect on outputs. Packaging changes do not resolve these questions.
-4. **Model and temporal metadata:** record complete priors/defaults, constraints/scaling, software/hardware/runtime, population vintages, fold inputs and the actual longer-horizon age comparator. Keep outcome-holdout claims distinct from real-time forecasts.
-5. **Final output consistency:** map every submitted figure/table to verified outputs; include the existing residual map and incidence-by-population display where available. Check source-plot labels against final captions. Record unavailable CPO/PIT outputs as a limitation.
-6. **Execution record:** after these items are reconciled, test the documented selected workflow in a fresh session and archive its session/package record and logs. State precisely which paths were tested and which remain untested.
-
-The partial-2026 evaluation, combined-score ranking and illustrative two-year allocation assumptions should remain aligned with the final manuscript. Ancillary notebook titles and narrative are historical research material, not evidence that every retained analysis is reported in the paper.
+The current manuscript distinguishes retrospective temporal evaluation from real-time forecasting. National CPO/PIT diagnostics were not available for the final model fit.

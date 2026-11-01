@@ -1,22 +1,26 @@
-# Chikungunya dynamics in Brazil
+# Chikungunya burden in Brazil
 
-Code and data for **“Geographic distribution and prioritization of reported chikungunya burden in Brazil, 2016–2025.”** The study examines reported disease burden using historical surveillance and population data; partial 2026 surveillance is held out for temporal evaluation.
+R code and data for *Geographic distribution and prioritization of reported chikungunya burden in Brazil, 2016–2025*.
 
-## Getting started
+The main analyses cover 2016–2025. A separate, partial 2026 surveillance dataset is used for temporal evaluation.
 
-From the repository root, check source files and R syntax without running analyses:
+## Running the code
+
+Clone the repository and run the input and syntax checks from its root:
 
 ```sh
 Rscript scripts/preflight.R --source-only
+Rscript scripts/preflight.R
 ```
 
-For dependencies and module execution, see the [reproducibility guide](docs/REPRODUCIBILITY.md). Generated outputs go to `results/` by default.
+To use files stored elsewhere on your computer, set `CHIKV_RESULTS_DIR` and any other relevant paths before running an analysis. See the [setup and reproducibility notes](docs/REPRODUCIBILITY.md) for examples.
 
-## Repository guide
+## Files
 
-- [`analysis/`](analysis/README.md): research modules and execution instructions.
-- [`chikungunya/`](chikungunya/) and [`population/`](population/): surveillance and population inputs.
-- [Data inventory](docs/DATA_INVENTORY.md): source files and expected outputs.
-- [Module-to-result map](docs/MODULE_TO_RESULT.md): manuscript analyses and retained ancillary work.
+- [`analysis/`](analysis/README.md) — numbered R scripts and notebooks
+- [`chikungunya/`](chikungunya/) — SINAN surveillance files
+- [`population/`](population/) — annual population inputs
+- [Data inventory](docs/DATA_INVENTORY.md) — input files and saved outputs
+- [Module guide](docs/MODULE_TO_RESULT.md) — which analyses correspond to manuscript results
 
-**Reproducibility status:** production fits, provenance and environment details remain incomplete; end-to-end reproduction has not yet been verified. See the reproducibility guide for outstanding requirements.
+Some notebooks use model fits produced on Cornell's HPC cluster. These saved results are not all included in the repository, so a full rerun of the production analysis has not been independently tested.
