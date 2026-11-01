@@ -7,8 +7,7 @@ editor_options:
 
 # Purpose
 
-This analysis addresses the revision-plan request for an **illustrative outcomes-averted-per-dose
-sensitivity analysis**.
+This notebook compares illustrative outcomes averted per dose under the prioritization rules from File 13.
 
 It compares the same municipality prioritization rules already used in File 13:
 
@@ -27,9 +26,7 @@ This is **not a vaccine impact evaluation**. It is a transparent scenario calcul
 assumed direct vaccine efficacy and coverage. It does not model indirect protection, transmission
 feedback, waning, implementation constraints, or causal vaccine effectiveness.
 
-A useful mathematical consequence is made explicit: under this linear direct-protection model,
-coverage changes the **total number of outcomes averted**, but not the expected number averted
-per 1,000 administered doses. The code verifies this rather than hiding it.
+Under this linear direct-protection model, coverage changes the **total number of outcomes averted**, but not the expected number averted per 1,000 administered doses. The code checks this relationship.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)

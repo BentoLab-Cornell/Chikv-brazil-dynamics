@@ -46,12 +46,11 @@ ensure_results_dir()
 # model objects instead of refitting them.
 ```
 
-# Revision summary
+# Model specification
 
-This file is the clean post-revision version of the chikungunya INLA analysis.
-It replaces the earlier exploratory `06_inla_spacetime_model.Rmd` workflow.
+This notebook describes the 2016–2025 model used in the revised manuscript. The earlier exploratory model is not used here.
 
-The main changes are:
+The main choices are:
 
 1. **Study period fixed to January 2016 through December 2025** (120 monthly time points).
 2. **All 5,570 Brazilian municipalities are retained in every month.**

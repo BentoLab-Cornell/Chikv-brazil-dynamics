@@ -9,8 +9,7 @@ editor_options:
 
 No new INLA severity model is fitted here.
 
-The revised framework retains the completed continuous transmission and severity quantities and
-adds the product-specific Step 11 metrics required for the two-product communication layer:
+This notebook calculates the relative incidence and severity components and the age-restricted scores used in the exploratory two-product plots:
 
 1. `T_i`: recent transmission intensity, defined as mean posterior IRR in 2024-2025.
 2. `V_i`: age-weighted severity vulnerability, defined as the municipality age-composition-weighted national age-specific observed CFR.

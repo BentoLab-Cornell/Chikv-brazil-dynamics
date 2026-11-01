@@ -1,5 +1,5 @@
 ---
-title: "17 - Secondary Longer-Horizon Forecast: 2016-2022 to 2024-2025 (Final Post-HPC)"
+title: "17 - Longer-Horizon Forecast (2016–2022 to 2024–2025)"
 output: html_document
 editor_options:
   chunk_output_type: console
@@ -7,14 +7,14 @@ editor_options:
 
 # Purpose
 
-This is the finalized secondary longer-horizon forecast analysis.
+This notebook scores the longer-horizon predictions from the 2016–2022 model.
 
 The computationally expensive INLA fit was completed on the Cornell Seneca HPC cluster.
 This local notebook **does not refit the model**. It reads the downloaded HPC outputs from
 
 `CHIKV_ROLLING_RUN_DIR/results/secondary_forecast_2016_2022_residence/`
 
-and reproduces the final scoring table, rank correlations, figure, and interpretation.
+and generates the scoring tables, rank correlations and figures.
 
 Model design:
 
@@ -356,7 +356,7 @@ The INLA-based ranking therefore improved case capture by approximately 10.0 per
 
 This secondary analysis complements the nine annual rolling-origin evaluations by examining whether a ranking generated using data available through 2022 retains targeting value for the combined 2024–2025 period without annual updating. These capture shares describe retrospective prioritization performance, not cases or deaths prevented.
 
-# Interpretation guardrails
+# Interpretation
 
 - Do not describe the capture shares as cases or deaths prevented.
 - Do not imply that the longer-horizon model always outperforms every comparator under every outcome or year; this analysis is an aggregate 2024-2025 test.

@@ -7,7 +7,7 @@ editor_options:
 
 # Purpose
 
-This file implements **Ana revision-plan Step 18: race and ethnicity denominators**.
+This notebook compares reported race/ethnicity distributions with population denominators from the 2022 census.
 
 The existing race analysis in File 04 is intentionally case-based only: it reports the
 distribution of confirmed chikungunya cases/deaths and race-specific case fatality, but it does
@@ -490,7 +490,7 @@ cat("Race categories: White, Black, Asian, Pardo (Mixed), Indigenous\n")
 cat("============================================================\n")
 ```
 
-# Interpretation guardrails
+# Interpretation
 
 1. The **primary race-specific incidence result is 2022 only**, because that is the year for
    which the numerator and census denominator align exactly.
