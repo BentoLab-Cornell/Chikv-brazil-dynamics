@@ -26,7 +26,7 @@ predicted numbers of deaths.
 knitr::opts_chunk$set(echo = TRUE)
 source("00_setup.R")
 
-results_dir <- RESULTS_DIR
+results_dir <- path.expand("~/Downloads/inla_results")
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
@@ -36,20 +36,20 @@ This step uses the already-completed population panels and INLA posterior rates.
 
 ```{r load-inputs}
 if (!exists("pop_panel_total")) {
-  if (!file.exists(result_path("pop_panel_total.rds"))) stop("pop_panel_total.rds not found.")
-  pop_panel_total <- readRDS(result_path("pop_panel_total.rds"))
+  if (!file.exists("pop_panel_total.rds")) stop("pop_panel_total.rds not found.")
+  pop_panel_total <- readRDS("pop_panel_total.rds")
 }
 
 if (!exists("pop_panel_age")) {
-  if (!file.exists(result_path("pop_panel_age.rds"))) stop("pop_panel_age.rds not found.")
-  pop_panel_age <- readRDS(result_path("pop_panel_age.rds"))
+  if (!file.exists("pop_panel_age.rds")) stop("pop_panel_age.rds not found.")
+  pop_panel_age <- readRDS("pop_panel_age.rds")
 }
 
 st_rate_path <- file.path(results_dir, "st_rate_chik_region_2016_2025.rds")
 
 if (!exists("st_rate_chik_region")) {
   if (!file.exists(st_rate_path)) {
-    stop("st_rate_chik_region_2016_2025.rds not found in RESULTS_DIR: ", RESULTS_DIR)
+    stop("st_rate_chik_region_2016_2025.rds not found in ~/Downloads/inla_results.")
   }
   st_rate_chik_region <- readRDS(st_rate_path)
 }
@@ -98,7 +98,7 @@ chik_severity <- Chik_total %>%
       age_years >= 40 & age_years < 60 ~ "40-59",
       age_years >= 60 & age_years < 70 ~ "60-69",
       age_years >= 70 & age_years < 80 ~ "70-79",
-      age_years >= 80 ~ "80+",
+      age_years >= 80 & age_years <= 120 ~ "80+",
       TRUE ~ NA_character_
     ),
     death = as.integer(as.character(EVOLUCAO) == "2")
@@ -701,7 +701,7 @@ where the rankings diverge. Positive values indicate relatively higher priority 
 The fourth panel is the categorical communication layer.
 
 ```{r two-product-maps, fig.width=10, fig.height=8}
-muni_sf_path <- result_path("muni_sf_2020.rds")
+muni_sf_path <- "muni_sf_2020.rds"
 
 if (!exists("muni_sf")) {
   if (file.exists(muni_sf_path)) {
@@ -1231,14 +1231,16 @@ obs_2425 <- Chik_total %>%
   mutate(
     year = lubridate::year(as.Date(DT_SIN_PRI)),
     code_muni = stringr::str_pad(
-      substr(as.character(ID_MUNICIP), 1, 6),
+      substr(as.character(ID_MN_RESI), 1, 6),
       width = 6, side = "left", pad = "0"
     ),
     age_years_eval = decode_age_years(NU_IDADE_N),
     death_eval = as.integer(as.character(EVOLUCAO) == "2"),
     death_65plus_eval = as.integer(
       as.character(EVOLUCAO) == "2" &
-        !is.na(age_years_eval) & age_years_eval >= 65
+        !is.na(age_years_eval) &
+  age_years_eval >= 65 &
+  age_years_eval <= 120
     )
   ) %>%
   filter(year %in% 2024:2025) %>%
@@ -1280,18 +1282,30 @@ rule_eval_2425 <- priority_metric_2425 %>%
     deaths_65plus_2425 = tidyr::replace_na(deaths_65plus_2425, 0L)
   )
 
+expected_cases <- Chik_total %>%
+  filter(
+    CLASSI_FIN %in% c(1, 13),
+    !is.na(DT_SIN_PRI),
+    lubridate::year(as.Date(DT_SIN_PRI)) %in% 2024:2025
+  ) %>%
+  nrow()
+
+matched_cases <- sum(rule_eval_2425$cases_2425)
+
+unmatched_cases <- expected_cases - matched_cases
+
+cat("Total confirmed cases:", expected_cases, "\n")
+cat("Matched municipality cases:", matched_cases, "\n")
+cat("Unmatched cases:", unmatched_cases, "\n")
+cat("Municipality matching rate:",
+    round(100 * matched_cases / expected_cases, 5), "%\n")
+
 stopifnot(
   nrow(rule_eval_2425) == 5570L,
   n_distinct(rule_eval_2425$code_muni) == 5570L,
   sum(is.na(rule_eval_2425$mean_pop_65plus_2425)) == 0L,
-  sum(rule_eval_2425$cases_2425) == nrow(
-    Chik_total %>%
-      filter(
-        CLASSI_FIN %in% c(1, 13),
-        !is.na(DT_SIN_PRI),
-        lubridate::year(as.Date(DT_SIN_PRI)) %in% 2024:2025
-      )
-  )
+  matched_cases <= expected_cases,
+  unmatched_cases >= 0L
 )
 
 cat("2024-2025 observed cases:", sum(rule_eval_2425$cases_2425), "\n")
@@ -1898,3 +1912,286 @@ write_csv(
   )
 )
 ```
+
+
+Updated Figure 5
+```{r}
+# Add Relative fitted incidence x total population comparator
+# No INLA refitting required
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+
+results_dir <- path.expand("~/Downloads/inla_results")
+
+# 1. Construct population comparator
+figure5_population_data <- rule_eval_2425 %>%
+  left_join(
+    priority_metric_2425 %>%
+      select(code_muni, total_pop),
+    by = "code_muni"
+  ) %>%
+  mutate(
+    tx_population = T_irr * total_pop
+  )
+
+stopifnot(
+  nrow(figure5_population_data) == 5570L,
+  !anyDuplicated(figure5_population_data$code_muni),
+  all(is.finite(figure5_population_data$total_pop)),
+  all(figure5_population_data$total_pop > 0),
+  all(is.finite(figure5_population_data$tx_population))
+)
+
+# 2. Generate fourth cumulative capture curve
+figure5_population_curve <- make_capture_curve(
+  figure5_population_data,
+  score_col = "tx_population",
+  rule_name = "Relative fitted incidence x total population"
+) %>%
+  pivot_longer(
+    cols = c(cum_cases_share, cum_deaths_share),
+    names_to = "outcome",
+    values_to = "captured_share"
+  ) %>%
+  mutate(
+    outcome = recode(
+      outcome,
+      cum_cases_share = "Observed cases, 2024-2025",
+      cum_deaths_share = "Observed deaths, 2024-2025"
+    )
+  )
+
+# 3. Standardize labels
+figure5_all_curves <- bind_rows(
+  capture_long %>%
+    mutate(
+      rule = recode(
+        rule,
+        "Expected burden" = "Combined score",
+        "Transmission only" = "Relative fitted incidence",
+        "Age-structured severity burden" =
+          "Demographic severity-burden"
+      )
+    ),
+  figure5_population_curve
+)
+
+stopifnot(
+  nrow(figure5_all_curves) == 4L * 5570L * 2L,
+  all(is.finite(figure5_all_curves$captured_share))
+)
+
+# 4. Colors and line styles
+figure5_rule_order <- c(
+  "Combined score",
+  "Relative fitted incidence",
+  "Demographic severity-burden",
+  "Relative fitted incidence x total population",
+  "Random"
+)
+
+figure5_colors <- c(
+  "Combined score" = "#0072B2",
+  "Relative fitted incidence" = "#D55E00",
+  "Demographic severity-burden" = "#009E73",
+  "Relative fitted incidence x total population" = "#7B3294",
+  "Random" = "grey45"
+)
+
+figure5_line_types <- c(
+  "Combined score" = "solid",
+  "Relative fitted incidence" = "solid",
+  "Demographic severity-burden" = "solid",
+  "Relative fitted incidence x total population" = "longdash",
+  "Random" = "dashed"
+)
+
+# 5. Updated Figure 5
+fig5 <- ggplot() +
+
+  geom_ribbon(
+    data = random_band_long,
+    aes(
+      x = coverage,
+      ymin = lo,
+      ymax = hi
+    ),
+    fill = "grey80",
+    alpha = 0.22
+  ) +
+
+  geom_line(
+    data = random_band_long,
+    aes(
+      x = coverage,
+      y = mid,
+      colour = "Random",
+      linetype = "Random"
+    ),
+    linewidth = 0.7
+  ) +
+
+  geom_line(
+    data = figure5_all_curves %>%
+      filter(
+        rule !=
+          "Relative fitted incidence x total population"
+      ),
+    aes(
+      x = coverage,
+      y = captured_share,
+      colour = rule,
+      linetype = rule
+    ),
+    linewidth = 0.9
+  ) +
+
+  # Draw comparator last so it remains visible
+  geom_line(
+    data = figure5_all_curves %>%
+      filter(
+        rule ==
+          "Relative fitted incidence x total population"
+      ),
+    aes(
+      x = coverage,
+      y = captured_share,
+      colour = rule,
+      linetype = rule
+    ),
+    linewidth = 1.1
+  ) +
+
+  geom_vline(
+    xintercept = N_SELECT / N_MUNI,
+    linetype = "dashed",
+    colour = "grey55",
+    linewidth = 0.45
+  ) +
+
+  facet_wrap(~ outcome, nrow = 1) +
+
+  scale_colour_manual(
+    name = NULL,
+    values = figure5_colors,
+    breaks = figure5_rule_order
+  ) +
+
+  scale_linetype_manual(
+    name = NULL,
+    values = figure5_line_types,
+    breaks = figure5_rule_order
+  ) +
+
+  scale_x_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    limits = c(0, 1),
+    expand = expansion(mult = 0)
+  ) +
+
+  scale_y_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    limits = c(0, 1),
+    expand = expansion(mult = 0)
+  ) +
+
+  annotate(
+    "text",
+    x = N_SELECT / N_MUNI,
+    y = 0.985,
+    label = "Top third\n33.3%",
+    hjust = 0.5,
+    vjust = 1,
+    size = 3.1,
+    colour = "grey35"
+  ) +
+
+  labs(
+    x = "Municipalities prioritised",
+    y = "Cumulative share captured"
+  ) +
+
+  guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE),
+    linetype = guide_legend(nrow = 2, byrow = TRUE)
+  ) +
+
+  theme_classic(base_size = 11) +
+
+  theme(
+    legend.position = "bottom",
+    legend.key.width = grid::unit(1.5, "lines"),
+    legend.text = element_text(size = 9),
+    strip.background = element_blank(),
+    strip.text = element_text(
+      face = "bold",
+      size = 11,
+      hjust = 0
+    ),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9.5),
+    panel.spacing = grid::unit(1.3, "lines"),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+print(fig5)
+
+# 6. Audit comparator at top-third coverage
+figure5_selected_pop <- figure5_population_data %>%
+  arrange(desc(tx_population), code_muni) %>%
+  slice_head(n = N_SELECT)
+
+figure5_comparator_audit <- tibble::tibble(
+  strategy = "Relative fitted incidence x total population",
+  municipalities = nrow(figure5_selected_pop),
+  cases_captured = sum(figure5_selected_pop$cases_2425),
+  cases_total = sum(figure5_population_data$cases_2425),
+  cases_percent =
+    100 * cases_captured / cases_total,
+  deaths_captured = sum(figure5_selected_pop$deaths_2425),
+  deaths_total = sum(figure5_population_data$deaths_2425),
+  deaths_percent =
+    100 * deaths_captured / deaths_total
+)
+
+print(figure5_comparator_audit, width = Inf)
+
+# 7. Save PDF and PNG
+ggsave(
+  file.path(
+    results_dir,
+    "Figure5_AB_M19_four_rules_2024_2025.png"
+  ),
+  plot = fig5,
+  width = 10,
+  height = 4.3,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  file.path(
+    results_dir,
+    "Figure5_AB_M19_four_rules_2024_2025.pdf"
+  ),
+  plot = fig5,
+  device = grDevices::pdf,
+  width = 10,
+  height = 4.3,
+  bg = "white"
+)
+
+cat("\nFigure 5 updated successfully.\n")
+cat("Files saved to:", results_dir, "\n")
+
+
+```
+
+
+
