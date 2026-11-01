@@ -32,8 +32,11 @@ record <- function(category, item, ok, detail = "", optional = FALSE) {
 
 raw_paths <- c(file.path("chikungunya", sprintf("CHIKBR%02d.dbc", 15:26)),
                file.path("population", sprintf("ibge_pop_age_%d_clean.csv", 2015:2025)))
-for (p in raw_paths) {
-  info <- file.info(file.path(PROJECT_ROOT, p))
+raw_input_paths <- c(file.path(CHIK_DATA_DIR, sprintf("CHIKBR%02d.dbc", 15:26)),
+                     file.path(IBGE_DOWNLOADS_DIR, sprintf("ibge_pop_age_%d_clean.csv", 2015:2025)))
+for (i in seq_along(raw_paths)) {
+  p <- raw_paths[i]
+  info <- file.info(raw_input_paths[i])
   record("input", p, !is.na(info$size) && info$size > 0 && !info$isdir,
          "Presence/nonempty check only; provenance and cohort validity need author verification.")
 }
@@ -77,6 +80,8 @@ if (!source_only && !is.null(inventory)) {
     artifact <- inventory$path[i]
     p <- if (artifact %in% c("Chik_total.rds", "pop_panel_total.rds", "pop_panel_age.rds")) {
       prep_cache_path(artifact)
+    } else if (identical(artifact, "muni_sf_2020.rds")) {
+      configured_path("CHIKV_MUNI_GEOMETRY_PATH", result_path(artifact))
     } else if (grepl("^fit_shared_[0-9]{4}\\.rds$|^shared_component_|^health_region_graph_2025\\.adj$", artifact)) {
       file.path(shared_component_dir(), artifact)
     } else if (grepl("^(rolling_origin_residence|secondary_forecast_2016_2022_residence)/", artifact)) {
@@ -107,7 +112,7 @@ if (!is.null(report_dir)) {
   dir.create(report_dir, recursive = TRUE, showWarnings = FALSE)
   write.csv(checks, file.path(report_dir, "preflight_checks.csv"), row.names = FALSE)
   if (nrow(package_report)) write.csv(package_report, file.path(report_dir, "installed_packages.csv"), row.names = FALSE)
-  input_files <- file.path(PROJECT_ROOT, raw_paths)
+  input_files <- raw_input_paths
   existing <- file.exists(input_files)
   write.csv(data.frame(path = raw_paths[existing], md5 = unname(tools::md5sum(input_files[existing]))),
             file.path(report_dir, "input_checksums.csv"), row.names = FALSE)
