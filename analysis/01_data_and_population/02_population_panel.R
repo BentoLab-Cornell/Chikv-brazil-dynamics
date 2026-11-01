@@ -287,12 +287,12 @@ stopifnot(
 
 saveRDS(
   pop_panel_total,
-  result_path("pop_panel_total.rds")
+  "pop_panel_total.rds"
 )
 
 saveRDS(
   pop_panel_age,
-  result_path("pop_panel_age.rds")
+  "pop_panel_age.rds"
 )
 
 

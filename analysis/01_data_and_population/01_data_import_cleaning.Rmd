@@ -15,19 +15,19 @@ source("00_setup.R")
 The primary study period is 2016-2025. The 2026 file is kept separate for held-out temporal validation and is never included in the primary analytic dataset.
 
 ```{r import}
-CHIK16 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR16.dbc"))
-CHIK17 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR17.dbc"))
-CHIK18 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR18.dbc"))
-CHIK19 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR19.dbc"))
-CHIK20 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR20.dbc"))
-CHIK21 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR21.dbc"))
-CHIK22 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR22.dbc"))
-CHIK23 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR23.dbc"))
-CHIK24 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR24.dbc"))
-CHIK25 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR25.dbc"))
+CHIK16 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR16.dbc"))
+CHIK17 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR17.dbc"))
+CHIK18 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR18.dbc"))
+CHIK19 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR19.dbc"))
+CHIK20 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR20.dbc"))
+CHIK21 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR21.dbc"))
+CHIK22 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR22.dbc"))
+CHIK23 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR23.dbc"))
+CHIK24 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR24.dbc"))
+CHIK25 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR25.dbc"))
 
 # Held-out 2026 data; never bind into Chik_total.
-CHIK26 <- read.dbc(file.path(CHIK_DATA_DIR, "CHIKBR26.dbc"))
+CHIK26 <- read.dbc(file.path(RAW_DBC_DIR, "CHIKdata", "CHIKBR26.dbc"))
 ```
 
 ## Construct the 2016-2025 analytic dataset
@@ -159,6 +159,30 @@ Chik_total <- Chik_total %>%
     )
   )
 
+# Standardize municipality of residence
+
+Chik_total <- Chik_total %>%
+  mutate(
+    code_muni_raw = stringr::str_pad(
+      substr(as.character(ID_MN_RESI), 1, 6),
+      6, pad = "0"
+    ),
+    code_muni = dplyr::if_else(
+      stringr::str_detect(code_muni_raw, "^5399"),
+      "530010",
+      code_muni_raw
+    ),
+    code_state = substr(code_muni, 1, 2)
+  )
+
+# Check the changes
+Chik_total %>%
+  summarise(
+    total_cases = n(),
+    missing_residence = sum(is.na(code_muni_raw)),
+    df_reassigned = sum(code_muni_raw != code_muni, na.rm = TRUE)
+  ) %>%
+  print()
 # Legacy object name retained because downstream scripts still use it.
 combined_all <- Chik_total
 ```
@@ -223,10 +247,4 @@ stopifnot(
   nrow(combined_all) == nrow(Chik_total),
   identical(combined_all, Chik_total)
 )
-```
-
-## Save the analytic object for downstream sessions
-
-```{r save-analytic-object}
-saveRDS(Chik_total, result_path("Chik_total.rds"))
 ```
