@@ -7,6 +7,7 @@ brazil_muni_2020.adj,06_inla_spacetime_model_2016_2025.Rmd or14_rolling_origin_f
 mun_sf_simplified.rds,07_priority_metric_2016_2025.Rmd,07,optional,Simplified municipality geometry for maps; can be regenerated with geobr.
 health_region_graph_2025.adj,11_shared_component_model.Rmd,11,optional,Health-region adjacency graph; ordering must match the annual fits.
 panel_chik_2016_2025.rds,06_inla_spacetime_model_2016_2025.Rmd,Production fit provenance,optional,Municipality-month model panel; preserve row order and input versions.
+residence/panel_chik_2016_2025_residence.rds,Seneca production job 239791,06,required,Original row-ordered municipality-month panel saved with the production fit.
 residence/fit_chik_nb_2016_2025_residence.rds,External production run; specification retained as commented code in06,06,required,Saved production fit from outside this repository; required by module 06.
 fit_chik_poisson_2016_2025_residence.rds,External production run; specification retained as commented code in06,06,required,Saved production fit from outside this repository; required by module 06.
 fit_chik_nb_excl2020_2021_residence.rds,External production run; specification retained as commented code in06,06,required,Saved production fit from outside this repository; required by module 06.

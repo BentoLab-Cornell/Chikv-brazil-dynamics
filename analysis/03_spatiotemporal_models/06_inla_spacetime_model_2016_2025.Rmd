@@ -127,7 +127,9 @@ lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
 cat("Municipalities:", length(space_levels), "\n")
 ```
 
-# 2. Build the complete 2016-2025 municipality-month panel
+# 2. Read the municipality-month panel saved with the production fit
+
+The archived panel supplies the row order for the fitted values. The constructor below is used for the optional comparison with the prepared inputs.
 
 The revised panel is constructed **from the complete municipality x month grid
 first**, then confirmed case counts are joined onto it.
@@ -166,6 +168,7 @@ make_panel_muni_month_pop <- function(
     transmute(
       code_muni = substr(as.character(ID_MN_RESI), 1, 6),
       code_muni = str_pad(code_muni, width = 6, pad = "0"),
+      code_muni = if_else(startsWith(code_muni, "5399"), "530010", code_muni),
       ym_date    = floor_date(as.Date(DT_SIN_PRI), unit = "month"),
       is_conf    = CLASSI_FIN %in% c(1, 13)
     ) %>%
@@ -214,10 +217,19 @@ make_panel_muni_month_pop <- function(
 ```
 
 ```{r build-panel}
-panel_chik_2016_2025 <- make_panel_muni_month_pop(
-  Chik_total,
-  pop_panel_total,
-  space_levels
+primary_panel_path <- result_path("residence", "panel_chik_2016_2025_residence.rds")
+if (!file.exists(primary_panel_path)) {
+  stop("Panel saved with the production fit is required: ", primary_panel_path)
+}
+panel_chik_2016_2025 <- readRDS(primary_panel_path)
+stopifnot(
+  nrow(panel_chik_2016_2025) == 668400L,
+  sum(panel_chik_2016_2025$cases) == 1215063L,
+  !anyDuplicated(panel_chik_2016_2025$st_id),
+  all(panel_chik_2016_2025$st_id ==
+    (panel_chik_2016_2025$time - 1L) * length(space_levels) +
+    panel_chik_2016_2025$space),
+  all(space_levels[panel_chik_2016_2025$space] == panel_chik_2016_2025$code_muni)
 )
 
 cat("Rows:", nrow(panel_chik_2016_2025), "\n")
@@ -227,6 +239,13 @@ cat("Max st_id:", max(panel_chik_2016_2025$st_id), "\n")
 cat("Confirmed cases:", sum(panel_chik_2016_2025$cases), "\n")
 
 if (params$run_heavy_models) {
+  rebuilt_panel <- make_panel_muni_month_pop(Chik_total, pop_panel_total, space_levels)
+  archive_order <- match(panel_chik_2016_2025$st_id, rebuilt_panel$st_id)
+  stopifnot(
+    !anyNA(archive_order),
+    all(rebuilt_panel$cases[archive_order] == panel_chik_2016_2025$cases),
+    all(rebuilt_panel$POP[archive_order] == panel_chik_2016_2025$POP)
+  )
   saveRDS(
     panel_chik_2016_2025,
     file.path(results_dir, "panel_chik_2016_2025.rds")
@@ -240,7 +259,7 @@ Expected production values are:
 - 5,570 municipalities
 - 120 months
 - maximum `st_id = 668400`
-- 1,215,040 confirmed chikungunya cases
+- 1,215,063 confirmed chikungunya cases
 
 # 3. Primary INLA model
 
@@ -2105,10 +2124,11 @@ cat(
 )
 ```
 
-The residence-based primary model included 1,215,040
-observed confirmed cases. The sum of fitted posterior
-means was approximately 959,443 cases, corresponding
-to an observed-to-fitted ratio of 1.266.
+The residence-based primary model included
+`r format(obs_total, big.mark = ",", trim = TRUE)` observed confirmed cases.
+The sum of fitted posterior means was
+`r format(round(fit_total), big.mark = ",", trim = TRUE)` cases, corresponding
+to an observed-to-fitted ratio of `r sprintf("%.3f", obs_total / fit_total)`.
 
 This discrepancy indicates imperfect aggregate calibration
 despite the inclusion of municipality-month random effects,

@@ -29,6 +29,12 @@ Module 18 evaluates the pre-2026 municipality rankings against this frozen extra
 
 The notebooks obtain municipality and health-region geometry through `geobr`. The geometry, crosswalks and source versions used in the production runs have not been archived together in this repository.
 
+### Production residence panel
+
+Seneca job 239791 on 28 October 2026 used 668,400 municipality-month rows and 1,215,063 cases. The study retained 1,215,074 confirmed notifications before the municipality join. Federal District residence codes in the `5399xx` series were mapped to Brasília (`530010`), retaining 23 cases. Eleven records remained unmatched under the fixed 2020 geography. Seven had missing or zero residence codes, two had code `330000`, and two had code `510183` (Boa Esperança do Norte, added in 2025).
+
+The previous Module 06 notebook rebuilt the panel from the original residence codes and reported 1,215,040 cases. Module 06 now uses the panel archived with the production fit in its original row order. The Figure 3B regional summaries were reproduced from this panel and fit. The earlier Figure 5 evaluation count of 325,928 cases omitted four reassigned Brasília cases with onset in 2024–2025. The harmonized evaluation denominator is 325,932. The exact strategy-level outputs from the figure's original scoring archive remain to be reconciled.
+
 ## Generated artifacts
 
 Unless a separate directory is specified, paths are relative to `RESULTS_DIR` (default `results/`). Shared-component model files are under `CHIKV_SHARED_COMPONENT_DIR`, and rolling/secondary forecast files are under `CHIKV_ROLLING_RUN_DIR/results/`. These are expected file locations, not a list of outputs committed to GitHub. Run `scripts/preflight.R` to check local availability against the [artifact list](REQUIRED_ARTIFACTS.csv). Modules 01 and 02 can regenerate preparation caches.
@@ -38,7 +44,8 @@ Unless a separate directory is specified, paths are relative to `RESULTS_DIR` (d
 | `Chik_total.rds` | Module 01 primary confirmed-cohort cache; historical notifications and separate 2026 records also exist in memory during import but are not exported as these additional RDS caches |
 | `pop_panel_total.rds`, `pop_panel_age.rds` | Module 02 municipality-year total and age panels |
 | `muni_sf_2020.rds` | Cached 2020 municipality geometry when available; some modules can rebuild it via `geobr` |
-| `panel_chik_2016_2025.rds` | Module 06 municipality-month model panel |
+| `residence/panel_chik_2016_2025_residence.rds` | Original municipality-month panel saved with the primary fit by Seneca job 239791. Module 06 uses the archived row order. |
+| `panel_chik_2016_2025.rds` | Optional copy of the production panel written by Module 06 after comparing the archived and rebuilt inputs. |
 | `residence/fit_chik_nb_2016_2025_residence.rds` | Required primary fit loaded by module 06; executable production fitter/provenance still pending |
 | `fit_chik_poisson_2016_2025_residence.rds`, `fit_chik_nb_excl2020_2021_residence.rds`, `fit_cw_type1_2016_2025_residence.rds`, `fit_cw_type4_2016_2025_residence.rds` | Module 06 sensitivity fits |
 | `st_rate_chik_2016_2025.rds`, `st_rate_chik_region_2016_2025.rds` | Module 06 fitted-incidence tables used downstream; the latter historical name does not imply health-region aggregation |

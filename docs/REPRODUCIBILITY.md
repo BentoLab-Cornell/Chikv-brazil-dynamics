@@ -60,7 +60,7 @@ Rscript scripts/run_module.R 01 02
 
 The command above runs modules 01 and 02 in the same R process and writes reports to `RESULTS_DIR/reports/`. Other modules may need objects prepared in that session or saved outputs from earlier work. See the [module guide](MODULE_TO_RESULT.md) before choosing a sequence.
 
-Module 06 reads saved primary and sensitivity models; the fitting call in that notebook is commented out. Module 17 also reads saved predictions and scores rather than fitting the original longer-horizon model. Modules 11 and 14 contain active model fitting code. If the required fit is absent, running either notebook can start a lengthy fit.
+Module 06 reads saved primary and sensitivity models. Place the original panel `panel_chik_2016_2025_residence.rds` and its matching fit `fit_chik_nb_2016_2025_residence.rds` from Seneca job 239791 together under `RESULTS_DIR/residence/`. Module 06 preserves the panel's saved row order when attaching fitted values. Module 17 also reads saved predictions and scores rather than fitting the original longer-horizon model. Modules 11 and 14 contain active model fitting code. If the required fit is absent, running either notebook can start a lengthy fit.
 
 ## Reproducing the reported results
 
