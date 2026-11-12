@@ -46,7 +46,7 @@ Unless a separate directory is specified, paths are relative to `RESULTS_DIR` (d
 | `muni_sf_2020.rds` | Cached 2020 municipality geometry when available; some modules can rebuild it via `geobr` |
 | `residence/panel_chik_2016_2025_residence.rds` | Original municipality-month panel saved with the primary fit by Seneca job 239791. Module 06 uses the archived row order. |
 | `panel_chik_2016_2025.rds` | Optional copy of the production panel written by Module 06 after comparing the archived and rebuilt inputs. |
-| `residence/fit_chik_nb_2016_2025_residence.rds` | Required primary fit loaded by module 06; executable production fitter/provenance still pending |
+| `residence/fit_chik_nb_2016_2025_residence.rds` | Primary fit loaded by Module 06. See the [production fitting instructions](REPRODUCIBILITY.md#primary-fit-on-seneca). |
 | `fit_chik_poisson_2016_2025_residence.rds`, `fit_chik_nb_excl2020_2021_residence.rds`, `fit_cw_type1_2016_2025_residence.rds`, `fit_cw_type4_2016_2025_residence.rds` | Module 06 sensitivity fits |
 | `st_rate_chik_2016_2025.rds`, `st_rate_chik_region_2016_2025.rds` | Module 06 fitted-incidence tables used downstream; the latter historical name does not imply health-region aggregation |
 | `<shared-component-root>/fit_shared_2016.rds` … `fit_shared_2025.rds` | Module 11 annual shared-component fits |
@@ -56,7 +56,7 @@ Unless a separate directory is specified, paths are relative to `RESULTS_DIR` (d
 | `<rolling-run-root>/results/rolling_origin_residence/fits/fit_rolling_predict_YEAR.rds`, `<rolling-run-root>/results/rolling_origin_residence/predictions/forecast_annual_predict_YEAR.csv` (`YEAR` = 2017–2025) | Module 14 annual rolling fits/predictions |
 | `<rolling-run-root>/results/rolling_origin_residence/scoring/rolling_origin_yearly_performance_2017_2025.csv`, `rolling_origin_performance_summary_2017_2025.csv`, `rolling_origin_reporting_table_2017_2025.csv` in the same folder | Module 15 rolling capture/scoring tables |
 | `<rolling-run-root>/results/secondary_forecast_2016_2022_residence/predictions/forecast_secondary_2024_2025.csv` | Longer-horizon predictions read by module 17 |
-| `<rolling-run-root>/results/secondary_forecast_2016_2022_residence/scoring/secondary_forecast_performance_2016_2022_to_2024_2025.csv`, `secondary_forecast_rank_correlations_2016_2022.csv`, `secondary_forecast_municipality_rankings_2024_2025.csv` in the same folder | Saved longer-horizon scoring inputs read by module 17; the generating production route must be archived |
+| `<rolling-run-root>/results/secondary_forecast_2016_2022_residence/scoring/secondary_forecast_performance_2016_2022_to_2024_2025.csv`, `secondary_forecast_rank_correlations_2016_2022.csv`, `secondary_forecast_municipality_rankings_2024_2025.csv` in the same folder | Saved longer-horizon scoring inputs read by Module 17 |
 | `<rolling-run-root>/results/secondary_forecast_2016_2022_residence/fits/fit_secondary_through_2022_predict_2023_2025.rds` | Longer-horizon production fit identified by module 17; not a fitter contained in that notebook |
 | `external_validation_2026/external_validation_top_third_2026.csv`, `external_validation_municipality_2026.csv` in the same folder | Module 18 partial-2026 temporal evaluation; historical `external` filename retained |
 | `reporting_completeness_sensitivity/reporting_completeness_spearman_correlations.csv`, `reporting_completeness_top_third_overlap.csv` in the same folder | Module 19 fixed-fit score-window sensitivity; not a model refit or completeness estimate |
@@ -65,8 +65,8 @@ Unless a separate directory is specified, paths are relative to `RESULTS_DIR` (d
 
 Additional CSVs, plots and caches are written by the notebooks, including ancillary analyses. This table highlights dependencies and final-paper result families; consult each module's output calls for the complete generated-file list.
 
-## Missing production evidence
+## Files stored separately
 
-The repository does not include the complete primary/sensitivity fit archive, rolling predictions, longer-horizon output bundle, production environment lockfile or HPC logs. A production manifest should identify the generating code, input checksums, model settings, municipality ordering, source versions and matching outputs.
+The repository does not include the complete primary/sensitivity fit archive, rolling predictions, longer-horizon output bundle, production environment lockfile or HPC logs. See the [production fitting instructions](REPRODUCIBILITY.md#primary-fit-on-seneca) for the primary job and its inputs.
 
 Keep input versions fixed when comparing against the submitted results, particularly the partial-2026 snapshot, annual population files and municipality definitions.
