@@ -12,7 +12,7 @@ The repository contains the following input files. Their presence does not estab
 
 The population CSVs contain a municipality identifier/name column, age columns from under 1 year through 79 years, an open-ended 80+ category, and `Total`. Module 02 reads the files as Latin-1. Do not overwrite these source files with generated panels.
 
-The surveillance files come from SINAN/DATASUS; the cleaned population files are labelled as IBGE-derived. Release dates, extraction records and the preparation of the annual age estimates still need documentation.
+The surveillance files come from SINAN/DATASUS. The 2016–2025 population inputs were verified against the 2000–2025 RIPSA municipality population estimates by age and sex distributed through DATASUS TabNet. See the [population input notes](../population/README.md#source-and-preparation) for the source table, verification, and alignment to the fixed 2020 municipality geography.
 
 ### Frozen 2026 surveillance snapshot
 
