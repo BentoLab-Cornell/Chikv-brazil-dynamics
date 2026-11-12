@@ -66,11 +66,32 @@ Module 06 reads saved primary and sensitivity models. Place the original panel `
 
 A successful preflight confirms that local files and dependencies can be found. It does not establish that a saved fit corresponds to the published model or reproduce the HPC run.
 
-For a complete production archive, the following information is still needed:
+### Primary fit on Seneca
 
-- The executable fitting scripts and saved model outputs (or keyed posterior and prediction summaries), together with input checksums and run logs.
-- Source and release details for the SINAN extracts and the annual IBGE population files, including the transformations used to construct the cleaned files.
-- Model settings, software versions, municipality ordering and population vintages used in the forecasting runs.
-- A record linking each submitted table or figure to its source output.
+The [production fitter](../production/primary/02_fit_primary_nb_2016_2025_residence.R) and [Slurm launcher](../production/primary/run_primary_nb_2016_2025_residence.slurm) are the scripts used for job 239791. The job completed on 28 October 2026 with R 4.6.0 and INLA 26.08.07. Its panel contained 668,400 rows, 5,570 municipalities, 120 months and 1,215,063 cases.
+
+Run Module 01 to create the confirmed cohort and harmonize residence codes. In the same R session, write the harmonized six-digit residence code under the field name expected by the fitter:
+
+```r
+saveRDS(
+  dplyr::mutate(Chik_total, ID_MN_RESI_CORR = code_muni),
+  file.path(production_dir, "Chik_total_residence_corrected.rds")
+)
+```
+
+Set `production_dir` to the working directory for the job before running that command. Copy the Module 02 `pop_panel_total.rds`, the original ordered `muni_sf_2020.rds`, the matching `brazil_muni_2020.adj` and both production scripts into that directory. The adjacency file was matched to the copy in the rolling-origin archive by SHA-256 (`0fcaed9c0bfb4e3c489a8f6665249685f7aa92662d3ae61437be80b2baca95ea`). Keep the geometry and graph in their original order.
+
+From the working directory on Seneca, with the R and Conda paths in the launcher configured for your account, run:
+
+```sh
+mkdir -p logs results
+sbatch run_primary_nb_2016_2025_residence.slurm
+```
+
+The fitter writes the primary fit, its matching panel and a text summary under `results/`. To use an existing fit, place the matching fit and panel under `RESULTS_DIR/residence/` as described above.
+
+### Longer-horizon evaluation
+
+Module 17 reads the saved municipality predictions from `secondary_forecast_2016_2022_residence/predictions/` and the performance, rank-correlation and municipality-ranking CSVs from `secondary_forecast_2016_2022_residence/scoring/`. Keep both directories under `CHIKV_ROLLING_RUN_DIR/results/`. The notebook uses these outputs to assemble the reported evaluation.
 
 The current manuscript distinguishes retrospective temporal evaluation from real-time forecasting. National CPO/PIT diagnostics were not available for the final model fit.
