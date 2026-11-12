@@ -48,7 +48,7 @@ These commands do not run the analyses. The full check reports missing required 
 
 The notebooks use R with `knitr`, `read.dbc`, `dplyr`, `tidyr`, `readr`, `readxl`, `ggplot2`, `sf`, `geobr`, `spdep`, `INLA` and other packages listed in `analysis/00_setup.R` and the individual scripts. System libraries may be needed for spatial packages.
 
-A production lockfile is not available. The original installation source and version of `read.dbc`, along with the full production package environment, still need to be documented. The installed-package report describes the computer on which the check was run.
+The DBC import environment was checked using the installed package metadata. It reported `read.dbc` version `1.0.6` from CRAN, built for R `4.6.0` on `aarch64-apple-darwin23`. The primary Seneca fit reads prepared RDS inputs and does not load `read.dbc`. A full production environment lockfile is unavailable.
 
 Some notebooks download municipality geometry using `geobr` when no cached copy is present. Reusing the original geometry and adjacency files is preferable when checking saved model outputs.
 
