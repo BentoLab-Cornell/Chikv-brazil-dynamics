@@ -12,6 +12,6 @@ The 2016–2025 inputs were verified against the 2000–2025 RIPSA release *Resi
 
 Module 02 takes the six-digit municipality identifier from the source labels, reshapes the age columns to long format, and filters both panels to the 5,570 municipalities in the 2020 IBGE geography obtained via `geobr`. The 2025 source table includes 5,571 municipalities. Boa Esperança do Norte (`510183`) falls outside the fixed study geography, so its population was excluded without redistribution. The resulting panel covers 55,700 municipality-years. The age-category counts sum to the published total for every retained municipality-year.
 
-The release is retrospective. Its target-year population estimates were used as covariates in rolling-origin validation. The verification covers the 2016–2025 inputs used in the paper. The original export date for the cleaned CSVs remains undocumented.
+The release is retrospective. Its target-year population estimates were used as covariates in rolling-origin validation. The verification covers the 2016–2025 inputs used in the paper. The population tables were exported from DATASUS TabNet on 1 May 2026.
 
 See the [data inventory](../docs/DATA_INVENTORY.md) and [setup guide](../docs/REPRODUCIBILITY.md).
