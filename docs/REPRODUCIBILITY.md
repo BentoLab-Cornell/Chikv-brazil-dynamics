@@ -2,6 +2,10 @@
 
 The repository includes surveillance inputs, cleaned population files and the R analysis code. Some model fits and forecasts were produced separately on HPC and must be supplied to rerun the corresponding downstream notebooks.
 
+## Archived analysis outputs
+
+Download `AB9_submission_candidate.tar.gz` from the [paper revision release](https://github.com/BentoLab-Cornell/Chikv-brazil-dynamics/releases/tag/paper-revision-2026-11). It includes the primary fit and matching panel, production scripts and log, shared-component and sensitivity fits, and saved prediction, scoring and plotting data. Extract it and set `CHIKV_RESULTS_DIR` to the extracted `results/` directory. Run `shasum -a 256 -c SHA256SUMS.txt` from the extracted archive root to check the files.
+
 ## File paths
 
 Run commands from the repository root. `analysis/00_paths.R` defines the paths used by the notebooks; `analysis/00_setup.R` loads them.
